@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """KiCad footprint generator for LX3302A linear primary coil layouts.
 
-This first milestone emits the two primary oscillator windings only.  Receiver
+OSC1 is implemented first from the annotated bottom-layer point map. Receiver
 dimensions remain in the configuration because the primary envelope is sized
 from the future CL1/CL2 sensing region.
 """
@@ -36,7 +36,7 @@ MAIN_PROPERTIES = {
     # Primary oscillator sizing
     "primary_end_extension_mm": 3.0,
     "primary_y_margin_mm": 3.0,
-    "number_of_primary_turns": 2,
+    "number_of_primary_turns": 3,
 
     # Placement and output
     "target_side": "top",
@@ -48,7 +48,7 @@ MAIN_PROPERTIES = {
     "osc1_output_pad_name": "OSC1",
     "osc2_output_pad_name": "OSC2",
     "generate_osc1": True,
-    "generate_osc2": True,
+    "generate_osc2": False,
 }
 
 
@@ -61,9 +61,8 @@ FINE_TUNING_PROPERTIES = {
     "trace_spacing_mm": 7 * MIL_TO_MM,
     "via_hole_size_mm": 10 * MIL_TO_MM,
     "via_diameter_mm": 20 * MIL_TO_MM,
-    "fanout_escape_length_mm": 2.0,
-    "fanout_pad_run_mm": 1.0,
-    "fanout_pad_pitch_mm": 1.0,
+    "terminal_escape_length_mm": 5.0,
+    "osc1_vin_exit_offset_mm": 1.2,
 }
 
 
@@ -84,8 +83,10 @@ class PrimaryCoil:
 
     name: str
     layer: str
+    escape_layer: str
+    points: dict[str, Point]
     body_segments: tuple[Segment, ...]
-    fanout_segments: tuple[Segment, ...]
+    escape_segments: tuple[Segment, ...]
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,7 @@ class PrimaryGeometry:
 
     dimensions: SensorDimensions
     pads: dict[str, Point]
-    coils: tuple[PrimaryCoil, PrimaryCoil]
+    coils: tuple[PrimaryCoil, ...]
 
 
 def build_config(overrides: dict | None = None) -> dict:
@@ -138,6 +139,15 @@ def primary_layers(cfg: dict) -> tuple[str, str]:
     raise ValueError("target_side must be 'top' or 'bottom'.")
 
 
+def target_facing_layer(cfg: dict) -> str:
+    """Return the external copper layer nearest the moving target."""
+    if cfg["target_side"] == "top":
+        return "F.Cu"
+    if cfg["target_side"] == "bottom":
+        return "B.Cu"
+    raise ValueError("target_side must be 'top' or 'bottom'.")
+
+
 def fanout_direction(cfg: dict) -> float:
     """Return -1 for a left breakout or +1 for a right breakout."""
     if cfg["fanout_side"] == "left":
@@ -149,6 +159,16 @@ def fanout_direction(cfg: dict) -> float:
 
 def trace_pitch(cfg: dict) -> float:
     return cfg["trace_width_mm"] + cfg["trace_spacing_mm"]
+
+
+def parallel_45_center_shift(cfg: dict) -> float:
+    """Offset parallel 45 degree transitions so their perpendicular pitch is legal."""
+    return trace_pitch(cfg) * (math.sqrt(2.0) - 1.0)
+
+
+def parallel_45_junction_separation(cfg: dict) -> float:
+    """Separate same-column ends of adjacent 45 degree transitions."""
+    return trace_pitch(cfg) * math.sqrt(2.0)
 
 
 def distance(point_a: Point, point_b: Point) -> float:
@@ -184,9 +204,8 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         "trace_spacing_mm",
         "via_hole_size_mm",
         "via_diameter_mm",
-        "fanout_escape_length_mm",
-        "fanout_pad_run_mm",
-        "fanout_pad_pitch_mm",
+        "terminal_escape_length_mm",
+        "osc1_vin_exit_offset_mm",
     )
     for name in positive_values:
         if cfg[name] <= 0:
@@ -199,6 +218,8 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         raise ValueError("number_of_primary_turns must be a positive integer.")
     if not isinstance(cfg["generate_osc1"], bool) or not isinstance(cfg["generate_osc2"], bool):
         raise ValueError("generate_osc1 and generate_osc2 must be booleans.")
+    if cfg["generate_osc2"]:
+        raise ValueError("OSC2 generation is deferred until its point map is defined.")
 
     primary_layers(cfg)
     fanout_direction(cfg)
@@ -217,172 +238,159 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         raise ValueError("Primary width is insufficient for requested turns and trace spacing.")
     if inner_length < pitch:
         raise ValueError("Primary length is insufficient for requested turns and trace spacing.")
-    if cfg["fanout_pad_pitch_mm"] < cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]:
-        raise ValueError("fanout_pad_pitch_mm does not maintain via-to-via clearance.")
-
-
-def build_rectangular_spiral(
-    cfg: dict,
-    dimensions: SensorDimensions,
-) -> tuple[tuple[Segment, ...], Point, Point]:
-    """Build an open, sharp-corner rectangular spiral with endpoints at the fanout end."""
-    side = fanout_direction(cfg)
-    pitch = trace_pitch(cfg)
-    half_length = dimensions.primary_length_mm / 2.0
-    half_width = dimensions.primary_width_mm / 2.0
-    segments: list[Segment] = []
-    first_endpoint: Point | None = None
-    final_endpoint: Point | None = None
-
-    for turn in range(cfg["number_of_primary_turns"]):
-        x_radius = half_length - (turn * pitch)
-        y_radius = half_width - (turn * pitch)
-        near_x = side * x_radius
-        far_x = -near_x
-        traverse_top_first = turn % 2 == 0
-
-        if traverse_top_first:
-            points = (
-                (near_x, -y_radius),
-                (far_x, -y_radius),
-                (far_x, y_radius),
-                (near_x, y_radius),
-            )
-        else:
-            points = (
-                (near_x, y_radius),
-                (far_x, y_radius),
-                (far_x, -y_radius),
-                (near_x, -y_radius),
-            )
-
-        if first_endpoint is None:
-            first_endpoint = points[0]
-        for start, end in zip(points, points[1:]):
-            segments.append((start, end))
-
-        final_endpoint = points[-1]
-        if turn == cfg["number_of_primary_turns"] - 1:
-            continue
-
-        next_near_x = side * (x_radius - pitch)
-        next_y_radius = y_radius - pitch
-        next_y = next_y_radius if traverse_top_first else -next_y_radius
-        corner_step = (near_x, next_y)
-        next_start = (next_near_x, next_y)
-        segments.append((final_endpoint, corner_step))
-        segments.append((corner_step, next_start))
-
-    assert first_endpoint is not None
-    assert final_endpoint is not None
-    return tuple(segments), first_endpoint, final_endpoint
-
-
-def calculate_fanout_pads(cfg: dict, dimensions: SensorDimensions) -> dict[str, Point]:
-    """Place ordered through-via connections above and outside the active loop."""
-    side = fanout_direction(cfg)
-    pad_x = side * (
-        (dimensions.primary_length_mm / 2.0)
-        + cfg["fanout_escape_length_mm"]
-        + cfg["fanout_pad_run_mm"]
-    )
-    outer_top_y = -(dimensions.primary_width_mm / 2.0)
-    pitch = cfg["fanout_pad_pitch_mm"]
-    return {
-        cfg["osc2_output_pad_name"]: (pad_x, outer_top_y - (2.0 * pitch)),
-        cfg["primary_input_pad_name"]: (pad_x, outer_top_y - pitch),
-        cfg["osc1_output_pad_name"]: (pad_x, outer_top_y),
-    }
-
-
-def route_endpoint_to_pad(
-    cfg: dict,
-    dimensions: SensorDimensions,
-    endpoint: Point,
-    pad: Point,
-) -> tuple[Segment, Segment]:
-    """Route through a pad lane outside the loop before reaching a plated via."""
-    side = fanout_direction(cfg)
-    routing_x = side * (
-        (dimensions.primary_length_mm / 2.0) + cfg["fanout_escape_length_mm"]
-    )
-    lane_point = (routing_x, pad[1])
-    return (endpoint, lane_point), (lane_point, pad)
-
-
-def validate_breakout_clearance(
-    cfg: dict,
-    pads: dict[str, Point],
-    body_segments: tuple[Segment, ...],
-    osc1_vin_route: tuple[Segment, ...],
-    osc1_output_route: tuple[Segment, ...],
-    osc2_vin_route: tuple[Segment, ...],
-    osc2_output_route: tuple[Segment, ...],
-) -> None:
-    """Ensure plated fanout vias do not contact unintended copper paths."""
-    pad_names = tuple(pads)
-    minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    for index, name in enumerate(pad_names):
-        for other_name in pad_names[index + 1:]:
-            if distance(pads[name], pads[other_name]) < minimum_pad_distance:
-                raise ValueError("Fanout pad spacing causes plated via clearance violations.")
-
-    minimum_trace_distance = (
+def osc1_via_trace_clearance(cfg: dict) -> float:
+    """Return center-to-center clearance from the U via to an adjacent trace."""
+    return (
         (cfg["via_diameter_mm"] / 2.0)
         + (cfg["trace_width_mm"] / 2.0)
         + cfg["trace_spacing_mm"]
     )
-    vin = cfg["primary_input_pad_name"]
-    osc1 = cfg["osc1_output_pad_name"]
-    osc2 = cfg["osc2_output_pad_name"]
-    osc1_fanout = osc1_vin_route + osc1_output_route
-    osc2_fanout = osc2_vin_route + osc2_output_route
-    prohibited = {
-        vin: body_segments + osc1_output_route + osc2_output_route,
-        osc1: body_segments + osc1_vin_route + osc2_fanout,
-        osc2: body_segments + osc1_fanout + osc2_vin_route,
+
+
+def osc1_turn_labels(turn_index: int) -> tuple[str, str, str, str, str, str]:
+    """Return point-map labels for a turn, extending names beyond the reference."""
+    point_map_labels = (
+        ("C", "D", "E", "F", "G", "H"),
+        ("I", "J", "K", "L", "M", "N"),
+        ("O", "P", "Q", "R", "S", "T"),
+    )
+    if turn_index < len(point_map_labels):
+        return point_map_labels[turn_index]
+    turn_number = turn_index + 1
+    return (
+        f"TURN{turn_number}_START",
+        f"TURN{turn_number}_BOTTOM_NEAR",
+        f"TURN{turn_number}_BOTTOM_FAR",
+        f"TURN{turn_number}_TOP_FAR",
+        f"TURN{turn_number}_TOP_NEAR",
+        f"TURN{turn_number}_END",
+    )
+
+
+def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Point]:
+    """Construct OSC1 points using the annotated A-through-V path pattern."""
+    side = fanout_direction(cfg)
+    pitch = trace_pitch(cfg)
+    diagonal_junction_separation = parallel_45_junction_separation(cfg)
+    half_length = dimensions.primary_length_mm / 2.0
+    half_width = dimensions.primary_width_mm / 2.0
+    outer_near_x = side * half_length
+    transition_half_height = pitch / 2.0
+    entry_x = outer_near_x + (side * transition_half_height)
+    terminal_x = outer_near_x + (side * cfg["terminal_escape_length_mm"])
+    points: dict[str, Point] = {
+        "A": (terminal_x, 0.0),
+        "B": (entry_x, 0.0),
     }
-    for name, segments in prohibited.items():
-        for segment in segments:
-            if point_to_segment_distance(pads[name], segment) < minimum_trace_distance:
-                raise ValueError(f"{name} breakout via violates primary trace clearance.")
+
+    start_y = transition_half_height
+    for turn in range(cfg["number_of_primary_turns"]):
+        x_near = side * (half_length - (turn * pitch))
+        x_far = -x_near
+        y_top = -(half_width - (turn * pitch))
+        y_bottom = half_width - (turn * pitch)
+        turn_labels = osc1_turn_labels(turn)
+        start, bottom_near, bottom_far, top_far, top_near, end = turn_labels
+        points[start] = (x_near, start_y)
+        points[bottom_near] = (x_near, y_bottom)
+        points[bottom_far] = (x_far, y_bottom)
+        points[top_far] = (x_far, y_top)
+        points[top_near] = (x_near, y_top)
+        points[end] = (x_near, start_y - diagonal_junction_separation)
+        start_y = points[end][1] + pitch
+
+    inner_near_x = side * (half_length - ((cfg["number_of_primary_turns"] - 1) * pitch))
+    via_transition = osc1_via_trace_clearance(cfg)
+    last_end = osc1_turn_labels(cfg["number_of_primary_turns"] - 1)[5]
+    via_y = -cfg["osc1_vin_exit_offset_mm"]
+    # The requested exit Y controls U; T is shifted upward so T-U remains a
+    # 45 degree descent into the via while honoring via-to-trace clearance.
+    points[last_end] = (inner_near_x, via_y - via_transition)
+    via_x = inner_near_x - (side * via_transition)
+    points["U"] = (via_x, via_y)
+    minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    terminal_separation_y = abs(via_y - points["A"][1])
+    additional_fanout = 0.0
+    if terminal_separation_y < minimum_pad_distance:
+        additional_fanout = math.sqrt(
+            (minimum_pad_distance * minimum_pad_distance)
+            - (terminal_separation_y * terminal_separation_y)
+        )
+    points["V"] = (terminal_x + (side * additional_fanout), via_y)
+    return points
+
+
+def build_osc1_segments(
+    cfg: dict,
+    points: dict[str, Point],
+) -> tuple[tuple[Segment, ...], tuple[Segment, ...]]:
+    """Return OSC1 bottom-layer winding and target-facing escape segments."""
+    point_sequence = ["A", "B"]
+    for turn in range(cfg["number_of_primary_turns"]):
+        point_sequence.extend(osc1_turn_labels(turn))
+    point_sequence.append("U")
+    body = tuple(
+        (points[start], points[end])
+        for start, end in zip(point_sequence, point_sequence[1:])
+    )
+    return body, ((points["U"], points["V"]),)
+
+
+def validate_osc1_clearance(
+    cfg: dict,
+    points: dict[str, Point],
+    body_segments: tuple[Segment, ...],
+    escape_segments: tuple[Segment, ...],
+) -> None:
+    """Ensure the OSC1 via transition and terminal vias are manufacturable."""
+    minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    if cfg["osc1_vin_exit_offset_mm"] < osc1_via_trace_clearance(cfg):
+        raise ValueError(
+            "osc1_vin_exit_offset_mm is too small for horizontal A-B and U-V "
+            "via-to-trace clearance."
+        )
+    for start, end in (("A", "V"), ("A", "U"), ("U", "V")):
+        if distance(points[start], points[end]) < minimum_pad_distance:
+            raise ValueError(f"OSC1 vias {start} and {end} violate plated via clearance.")
+
+    minimum_trace_distance = osc1_via_trace_clearance(cfg)
+    connected_body = {
+        "A": body_segments[:1],
+        "U": body_segments[-1:],
+        "V": (),
+    }
+    for pad_name in ("A", "U", "V"):
+        for segment in body_segments:
+            if segment in connected_body[pad_name]:
+                continue
+            if point_to_segment_distance(points[pad_name], segment) < minimum_trace_distance:
+                raise ValueError(f"OSC1 {pad_name} via violates clearance to winding copper.")
+    if point_to_segment_distance(points["A"], escape_segments[0]) < minimum_trace_distance:
+        raise ValueError("OSC1 A via violates clearance to the top-layer VIN escape.")
 
 
 def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
-    """Return calculated OSC1/OSC2 paths and their fanout pads."""
+    """Return point-driven OSC1 geometry; OSC2 is intentionally deferred."""
     cfg = build_config() if cfg is None else cfg
     dimensions = calculate_dimensions(cfg)
     validate_config(cfg, dimensions)
-    body_segments, first_endpoint, final_endpoint = build_rectangular_spiral(cfg, dimensions)
-    pads = calculate_fanout_pads(cfg, dimensions)
-    osc1_layer, osc2_layer = primary_layers(cfg)
-
-    vin = pads[cfg["primary_input_pad_name"]]
-    osc1_output = pads[cfg["osc1_output_pad_name"]]
-    osc2_output = pads[cfg["osc2_output_pad_name"]]
-    osc1_vin_route = route_endpoint_to_pad(cfg, dimensions, first_endpoint, vin)
-    osc1_output_route = route_endpoint_to_pad(cfg, dimensions, final_endpoint, osc1_output)
-    osc1_fanout = osc1_vin_route + osc1_output_route
-    # Connect VIN to the opposite spiral end to reverse OSC2 winding polarity.
-    osc2_vin_route = route_endpoint_to_pad(cfg, dimensions, final_endpoint, vin)
-    osc2_output_route = route_endpoint_to_pad(cfg, dimensions, first_endpoint, osc2_output)
-    osc2_fanout = osc2_vin_route + osc2_output_route
-    validate_breakout_clearance(
-        cfg,
-        pads,
-        body_segments,
-        osc1_vin_route,
-        osc1_output_route,
-        osc2_vin_route,
-        osc2_output_route,
-    )
+    points = build_osc1_point_map(cfg, dimensions)
+    body_segments, escape_segments = build_osc1_segments(cfg, points)
+    validate_osc1_clearance(cfg, points, body_segments, escape_segments)
+    osc1_layer, _ = primary_layers(cfg)
 
     return PrimaryGeometry(
         dimensions=dimensions,
-        pads=pads,
+        pads={"A": points["A"], "U": points["U"], "V": points["V"]},
         coils=(
-            PrimaryCoil("OSC1", osc1_layer, body_segments, osc1_fanout),
-            PrimaryCoil("OSC2", osc2_layer, tuple(reversed(body_segments)), osc2_fanout),
+            PrimaryCoil(
+                "OSC1",
+                osc1_layer,
+                target_facing_layer(cfg),
+                points,
+                body_segments,
+                escape_segments,
+            ),
         ),
     )
 
@@ -423,34 +431,34 @@ def render_footprint(cfg: dict | None = None) -> str:
         fp_text(cfg["reference_text"], cfg["footprint_name"]),
     ]
 
-    if cfg["generate_osc1"] or cfg["generate_osc2"]:
+    if cfg["generate_osc1"]:
+        coil = geometry.coils[0]
         sections.append(
             pad_thru_hole(
-                cfg["primary_input_pad_name"],
-                geometry.pads[cfg["primary_input_pad_name"]],
+                cfg["osc1_output_pad_name"],
+                geometry.pads["A"],
                 cfg["via_diameter_mm"],
                 cfg["via_hole_size_mm"],
             )
         )
-
-    enabled = {
-        "OSC1": cfg["generate_osc1"],
-        "OSC2": cfg["generate_osc2"],
-    }
-    output_pad_names = {
-        "OSC1": cfg["osc1_output_pad_name"],
-        "OSC2": cfg["osc2_output_pad_name"],
-    }
-    for coil in geometry.coils:
-        if not enabled[coil.name]:
-            continue
-        for segment in coil.body_segments + coil.fanout_segments:
+        for segment in coil.body_segments:
             sections.append(fp_line(segment[0], segment[1], cfg["trace_width_mm"], coil.layer))
-        pad_name = output_pad_names[coil.name]
         sections.append(
             pad_thru_hole(
-                pad_name,
-                geometry.pads[pad_name],
+                cfg["primary_input_pad_name"],
+                geometry.pads["U"],
+                cfg["via_diameter_mm"],
+                cfg["via_hole_size_mm"],
+            )
+        )
+        for segment in coil.escape_segments:
+            sections.append(
+                fp_line(segment[0], segment[1], cfg["trace_width_mm"], coil.escape_layer)
+            )
+        sections.append(
+            pad_thru_hole(
+                cfg["primary_input_pad_name"],
+                geometry.pads["V"],
                 cfg["via_diameter_mm"],
                 cfg["via_hole_size_mm"],
             )
