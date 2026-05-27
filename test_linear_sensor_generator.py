@@ -12,7 +12,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(geometry.dimensions.secondary_length_mm, 72.0)
         self.assertEqual(geometry.dimensions.secondary_width_mm, 5.5)
         self.assertEqual(geometry.dimensions.primary_length_mm, 78.0)
-        self.assertEqual(geometry.dimensions.primary_width_mm, 11.5)
+        self.assertEqual(geometry.dimensions.primary_width_mm, 5.65)
         self.assertEqual(osc1.name, "OSC1")
         self.assertEqual(osc1.layer, "B.Cu")
         self.assertEqual(osc1.escape_layer, "F.Cu")
@@ -247,10 +247,13 @@ class LinearSensorGeneratorTests(unittest.TestCase):
 
     def test_cl2_paired_vias_use_annular_clearance_spacing(self) -> None:
         cfg = generator.build_config()
+        primary = generator.build_primary_geometry(cfg)
         cl2 = generator.build_cl2_geometry(cfg)
         assert cl2 is not None
         expected_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
         pitch = generator.trace_pitch(cfg)
+        expected_primary_clearance = generator.osc1_via_trace_clearance(cfg)
+        inner_primary_y = generator.primary_inner_half_height(cfg, primary.dimensions)
 
         for first, second in (("E", "Y"), ("H", "ZB"), ("O", "ZI"), ("R", "ZL")):
             self.assertAlmostEqual(
@@ -261,6 +264,24 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertAlmostEqual(cl2.points["ZC"][1] - cl2.points["ZA"][1], pitch)
         self.assertAlmostEqual(cl2.points["ZG"][1] - cl2.points["J"][1], pitch)
         self.assertAlmostEqual(cl2.points["ZG"][1], -(cl2.points["J"][1]))
+        self.assertAlmostEqual(
+            cl2.points["H"][1],
+            inner_primary_y - expected_primary_clearance,
+        )
+        self.assertAlmostEqual(
+            cl2.points["E"][1],
+            -(inner_primary_y - expected_primary_clearance),
+        )
+        for via_label in ("E", "Y", "H", "ZB", "O", "ZI", "R", "ZL"):
+            nearest_primary_trace = min(
+                generator.point_to_segment_distance(cl2.points[via_label], segment)
+                for coil in primary.coils
+                for segment in coil.body_segments
+            )
+            self.assertGreaterEqual(
+                nearest_primary_trace + generator.GEOMETRY_TOLERANCE_MM,
+                expected_primary_clearance,
+            )
 
     def test_cl2_long_parallel_sinusoidal_rails_preserve_pitch(self) -> None:
         cfg = generator.build_config()

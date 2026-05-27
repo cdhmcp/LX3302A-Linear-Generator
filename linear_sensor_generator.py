@@ -247,6 +247,13 @@ def cl2_stroke_length(cfg: dict) -> float:
     return cfg["measurement_range_mm"] + cfg["target_x_mm"]
 
 
+def primary_inner_half_height(cfg: dict, dimensions: SensorDimensions) -> float:
+    """Return the innermost primary horizontal centerline distance from center."""
+    return (dimensions.primary_width_mm / 2.0) - (
+        (cfg["number_of_primary_turns"] - 1) * trace_pitch(cfg)
+    )
+
+
 def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> None:
     """Reject impossible envelope, fabrication, or breakout inputs."""
     positive_values = (
@@ -738,6 +745,12 @@ def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     amplitude = dimensions.secondary_width_mm / 2.0
     pitch = trace_pitch(cfg)
     via_pair_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    inner_primary_y = primary_inner_half_height(cfg, dimensions)
+    primary_via_clearance = osc1_via_trace_clearance(cfg)
+    # These plated transition vias belong inside all primary turns, not
+    # outside them. Move toward center from the innermost primary centerline.
+    upper_via_y = -(inner_primary_y - primary_via_clearance)
+    lower_via_y = inner_primary_y - primary_via_clearance
     runup = cfg["secondary_jump_runup_via_multiplier"] * cfg["via_diameter_mm"]
     detour = cfg["secondary_jump_detour_via_multiplier"] * cfg["via_diameter_mm"]
     terminal_x = -(dimensions.primary_length_mm / 2.0) - cfg["terminal_escape_length_mm"]
@@ -754,34 +767,34 @@ def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         "C": (-half_span, 0.0),
         # First forward pass.
         "D": (-quarter_span + (via_pair_spacing / 2.0), -amplitude),
-        "E": (-quarter_span + (via_pair_spacing / 2.0), -amplitude + via_pair_spacing),
+        "E": (-quarter_span + (via_pair_spacing / 2.0), upper_via_y),
         "F": (-quarter_span + (via_pair_spacing / 2.0), -amplitude + pitch),
         "G": (quarter_span + (via_pair_spacing / 2.0), amplitude),
-        "H": (quarter_span + (via_pair_spacing / 2.0), amplitude - via_pair_spacing),
+        "H": (quarter_span + (via_pair_spacing / 2.0), lower_via_y),
         "I": (quarter_span + (via_pair_spacing / 2.0), amplitude - pitch),
         "J": (half_span, -(pitch / 2.0)),
         # First reverse pass.
         "N": (quarter_span - (via_pair_spacing / 2.0), -amplitude),
-        "O": (quarter_span - (via_pair_spacing / 2.0), -amplitude + via_pair_spacing),
+        "O": (quarter_span - (via_pair_spacing / 2.0), upper_via_y),
         "P": (quarter_span - (via_pair_spacing / 2.0), -amplitude + pitch),
         "Q": (-quarter_span - (via_pair_spacing / 2.0), amplitude),
-        "R": (-quarter_span - (via_pair_spacing / 2.0), amplitude - via_pair_spacing),
+        "R": (-quarter_span - (via_pair_spacing / 2.0), lower_via_y),
         "S": (-quarter_span - (via_pair_spacing / 2.0), amplitude - pitch),
         "W": (-half_span + midpoint_horizontal_spacing, 0.0),
         # Second forward pass.
         "X": (-quarter_span - (via_pair_spacing / 2.0), -amplitude + pitch),
-        "Y": (-quarter_span - (via_pair_spacing / 2.0), -amplitude + via_pair_spacing),
+        "Y": (-quarter_span - (via_pair_spacing / 2.0), upper_via_y),
         "Z": (-quarter_span - (via_pair_spacing / 2.0), -amplitude),
         "ZA": (quarter_span - (via_pair_spacing / 2.0), amplitude - pitch),
-        "ZB": (quarter_span - (via_pair_spacing / 2.0), amplitude - via_pair_spacing),
+        "ZB": (quarter_span - (via_pair_spacing / 2.0), lower_via_y),
         "ZC": (quarter_span - (via_pair_spacing / 2.0), amplitude),
         "ZG": (half_span, pitch / 2.0),
         # Second reverse pass and terminal escape.
         "ZH": (quarter_span + (via_pair_spacing / 2.0), -amplitude + pitch),
-        "ZI": (quarter_span + (via_pair_spacing / 2.0), -amplitude + via_pair_spacing),
+        "ZI": (quarter_span + (via_pair_spacing / 2.0), upper_via_y),
         "ZJ": (quarter_span + (via_pair_spacing / 2.0), -amplitude),
         "ZK": (-quarter_span + (via_pair_spacing / 2.0), amplitude - pitch),
-        "ZL": (-quarter_span + (via_pair_spacing / 2.0), amplitude - via_pair_spacing),
+        "ZL": (-quarter_span + (via_pair_spacing / 2.0), lower_via_y),
         "ZM": (-quarter_span + (via_pair_spacing / 2.0), amplitude),
         "ZN": (-half_span, 0.0),
         "ZO": (terminal_x + terminal_fanout, 0.0),
@@ -943,6 +956,21 @@ def validate_cl2_clearance(
         for primary_pad in primary_pads:
             if distance(points[terminal], primary_pad) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance:
                 raise ValueError(f"CL2 terminal {terminal} collides with a primary via.")
+
+    minimum_primary_trace_distance = osc1_via_trace_clearance(cfg)
+    for via_label in ("E", "Y", "H", "ZB", "O", "ZI", "R", "ZL"):
+        nearest_primary_trace = min(
+            point_to_segment_distance(points[via_label], segment)
+            for coil in primary_geometry.coils
+            for segment in coil.body_segments
+        )
+        if (
+            nearest_primary_trace + GEOMETRY_TOLERANCE_MM
+            < minimum_primary_trace_distance
+        ):
+            raise ValueError(
+                f"CL2 via {via_label} violates clearance to the primary winding."
+            )
 
     pitch = trace_pitch(cfg)
     half_pitch = pitch / 2.0
