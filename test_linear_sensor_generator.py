@@ -1,3 +1,4 @@
+import math
 import unittest
 
 import linear_sensor_generator as generator
@@ -24,7 +25,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         coil = generator.build_primary_geometry().coils[0]
         points = coil.points
         pitch = generator.trace_pitch(generator.build_config())
-        transition_shift = generator.parallel_45_center_shift(generator.build_config())
+        transition_shift = pitch * (math.sqrt(2.0) - 1.0)
         junction_separation = generator.parallel_45_junction_separation(generator.build_config())
 
         self.assertEqual(coil.body_segments[0], (points["A"], points["B"]))
@@ -76,6 +77,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
     def test_default_footprint_emits_oscillators_receivers_and_two_vin_vias(self) -> None:
         footprint = generator.render_footprint()
 
+        self.assertIn('(footprint "LX3302A_LINEAR_SENSOR_COILS"', footprint)
         self.assertIn('(pad "OSC1" thru_hole', footprint)
         self.assertEqual(footprint.count('(pad "VIN" thru_hole'), 2)
         self.assertIn('(pad "OSC2" thru_hole', footprint)
@@ -88,6 +90,16 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertIn('(pad "CL1-GND" thru_hole', footprint)
         self.assertEqual(footprint.count("(fp_arc "), 5)
         self.assertIn('(layer "In1.Cu")', footprint)
+
+    def test_segment_distance_detects_crossing_touching_and_separated_segments(self) -> None:
+        crossing_first = ((0.0, 0.0), (2.0, 2.0))
+        crossing_second = ((0.0, 2.0), (2.0, 0.0))
+        touching = ((2.0, 2.0), (3.0, 2.0))
+        separated = ((0.0, 3.0), (2.0, 3.0))
+
+        self.assertEqual(generator.segment_to_segment_distance(crossing_first, crossing_second), 0.0)
+        self.assertEqual(generator.segment_to_segment_distance(crossing_first, touching), 0.0)
+        self.assertGreater(generator.segment_to_segment_distance(crossing_first, separated), 0.0)
 
     def test_external_terminal_vias_share_compact_column_and_cl1_is_straight(self) -> None:
         cfg = generator.build_config()

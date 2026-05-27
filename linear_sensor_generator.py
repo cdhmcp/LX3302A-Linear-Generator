@@ -43,7 +43,7 @@ MAIN_PROPERTIES = {
     "target_side": "top",
     "fanout_side": "left",
     "output_dir": "InductiveSensors.pretty",
-    "footprint_name": "LX3302A_LINEAR_PRIMARY_COILS",
+    "footprint_name": "LX3302A_LINEAR_SENSOR_COILS",
     "reference_text": "REF**",
     "primary_input_pad_name": "VIN",
     "osc1_output_pad_name": "OSC1",
@@ -249,11 +249,6 @@ def terminal_row_y(cfg: dict, pad_name: str) -> float:
     return row_index * terminal_pad_pitch(cfg)
 
 
-def parallel_45_center_shift(cfg: dict) -> float:
-    """Offset parallel 45 degree transitions so their perpendicular pitch is legal."""
-    return trace_pitch(cfg) * (math.sqrt(2.0) - 1.0)
-
-
 def parallel_45_junction_separation(cfg: dict) -> float:
     """Separate same-column ends of adjacent 45 degree transitions."""
     return trace_pitch(cfg) * math.sqrt(2.0)
@@ -279,8 +274,58 @@ def point_to_segment_distance(point: Point, segment: Segment) -> float:
     return distance(point, closest)
 
 
+def cross_product(first: Point, second: Point, third: Point) -> float:
+    """Return the signed cross product for the turn from first to third."""
+    return (
+        ((second[0] - first[0]) * (third[1] - first[1]))
+        - ((second[1] - first[1]) * (third[0] - first[0]))
+    )
+
+
+def point_on_segment(point: Point, segment: Segment) -> bool:
+    """Return whether a collinear point lies on a finite segment."""
+    start, end = segment
+    return (
+        abs(cross_product(start, end, point)) <= GEOMETRY_TOLERANCE_MM
+        and min(start[0], end[0]) - GEOMETRY_TOLERANCE_MM
+        <= point[0]
+        <= max(start[0], end[0]) + GEOMETRY_TOLERANCE_MM
+        and min(start[1], end[1]) - GEOMETRY_TOLERANCE_MM
+        <= point[1]
+        <= max(start[1], end[1]) + GEOMETRY_TOLERANCE_MM
+    )
+
+
+def segments_intersect(first: Segment, second: Segment) -> bool:
+    """Return whether two finite segments touch or cross."""
+    first_start, first_end = first
+    second_start, second_end = second
+    turns = (
+        cross_product(first_start, first_end, second_start),
+        cross_product(first_start, first_end, second_end),
+        cross_product(second_start, second_end, first_start),
+        cross_product(second_start, second_end, first_end),
+    )
+    if (
+        ((turns[0] > GEOMETRY_TOLERANCE_MM and turns[1] < -GEOMETRY_TOLERANCE_MM)
+         or (turns[0] < -GEOMETRY_TOLERANCE_MM and turns[1] > GEOMETRY_TOLERANCE_MM))
+        and
+        ((turns[2] > GEOMETRY_TOLERANCE_MM and turns[3] < -GEOMETRY_TOLERANCE_MM)
+         or (turns[2] < -GEOMETRY_TOLERANCE_MM and turns[3] > GEOMETRY_TOLERANCE_MM))
+    ):
+        return True
+    return (
+        (abs(turns[0]) <= GEOMETRY_TOLERANCE_MM and point_on_segment(second_start, first))
+        or (abs(turns[1]) <= GEOMETRY_TOLERANCE_MM and point_on_segment(second_end, first))
+        or (abs(turns[2]) <= GEOMETRY_TOLERANCE_MM and point_on_segment(first_start, second))
+        or (abs(turns[3]) <= GEOMETRY_TOLERANCE_MM and point_on_segment(first_end, second))
+    )
+
+
 def segment_to_segment_distance(first: Segment, second: Segment) -> float:
-    """Return the minimum distance between two non-crossing copper segments."""
+    """Return the minimum distance between two finite copper segments."""
+    if segments_intersect(first, second):
+        return 0.0
     return min(
         point_to_segment_distance(first[0], second),
         point_to_segment_distance(first[1], second),
@@ -301,11 +346,6 @@ def path_to_path_distance(first: tuple[Segment, ...], second: tuple[Segment, ...
 def secondary_stroke_length(cfg: dict) -> float:
     """Return the active waveform span shared by the two secondary coils."""
     return cfg["measurement_range_mm"] + cfg["target_x_mm"]
-
-
-def cl2_stroke_length(cfg: dict) -> float:
-    """Compatibility name for the active secondary waveform span."""
-    return secondary_stroke_length(cfg)
 
 
 def primary_inner_half_height(cfg: dict, dimensions: SensorDimensions) -> float:
@@ -844,7 +884,7 @@ def secondary_corrected_rail_point(
 
 def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Point]:
     """Construct the annotated two-turn CL2 point map in a left-entry frame."""
-    half_span = cl2_stroke_length(cfg) / 2.0
+    half_span = secondary_stroke_length(cfg) / 2.0
     quarter_span = half_span / 2.0
     amplitude = dimensions.secondary_width_mm / 2.0
     pitch = trace_pitch(cfg)
@@ -1113,7 +1153,7 @@ def build_cl2_geometry(
         name="CL2",
         target_layer=receiver_layers(cfg)[0],
         inner_layer=receiver_layers(cfg)[1],
-        stroke_length_mm=cl2_stroke_length(cfg),
+        stroke_length_mm=secondary_stroke_length(cfg),
         points=points,
         target_segments=target_segments,
         inner_segments=inner_segments,
@@ -1210,18 +1250,6 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     if fanout_direction(cfg) > 0:
         points = {label: (-point[0], point[1]) for label, point in points.items()}
     return points
-
-
-def bowed_arc(start: Point, end: Point, midpoint_offset: Point) -> Arc:
-    """Return an editable three-point arc bowed away from a nearby via."""
-    return (
-        start,
-        (
-            ((start[0] + end[0]) / 2.0) + midpoint_offset[0],
-            ((start[1] + end[1]) / 2.0) + midpoint_offset[1],
-        ),
-        end,
-    )
 
 
 def via_clearance_arc(cfg: dict, start: Point, end: Point, center: Point) -> Arc:
