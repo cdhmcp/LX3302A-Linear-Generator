@@ -65,7 +65,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(points["U"][1], -1.2)
         self.assertEqual(points["V"][1], -1.2)
 
-    def test_default_footprint_emits_oscillators_cl2_and_two_vin_vias(self) -> None:
+    def test_default_footprint_emits_oscillators_receivers_and_two_vin_vias(self) -> None:
         footprint = generator.render_footprint()
 
         self.assertIn('(pad "OSC1" thru_hole', footprint)
@@ -76,6 +76,9 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertIn('(layer "In2.Cu")', footprint)
         self.assertIn('(pad "CL2" thru_hole', footprint)
         self.assertIn('(pad "CL2-GND" thru_hole', footprint)
+        self.assertIn('(pad "CL1" thru_hole', footprint)
+        self.assertIn('(pad "CL1-GND" thru_hole', footprint)
+        self.assertEqual(footprint.count("(fp_arc "), 5)
         self.assertIn('(layer "In1.Cu")', footprint)
 
     def test_bottom_target_mirrors_primary_and_escape_layers(self) -> None:
@@ -341,6 +344,120 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             generator.build_cl2_geometry(
                 generator.build_config({"secondary_curve_samples_per_cycle": 8})
             )
+
+    def test_default_cl1_span_layers_corrected_vias_and_arcs(self) -> None:
+        cl1 = generator.build_cl1_geometry()
+        assert cl1 is not None
+
+        self.assertEqual(cl1.target_layer, "F.Cu")
+        self.assertEqual(cl1.inner_layer, "In1.Cu")
+        self.assertEqual(cl1.crossover_layer, "In2.Cu")
+        self.assertEqual(cl1.stroke_length_mm, 71.0)
+        self.assertIn("D", cl1.via_labels)
+        self.assertIn("X", cl1.via_labels)
+        self.assertNotIn("Z", cl1.via_labels)
+        self.assertIn((cl1.points["C"], cl1.points["D"]), cl1.crossover_segments)
+        self.assertIn((cl1.points["T"], cl1.points["U"]), cl1.crossover_segments)
+        self.assertEqual(len(cl1.target_arcs), 2)
+        self.assertEqual(len(cl1.inner_arcs), 3)
+
+    def test_cl1_point_map_is_continuous_across_crossover_and_arc_transitions(self) -> None:
+        cl1 = generator.build_cl1_geometry()
+        assert cl1 is not None
+
+        self.assertIn((cl1.points["A"], cl1.points["B"]), cl1.target_segments)
+        self.assertIn((cl1.points["D"], cl1.points["E"]), cl1.target_segments)
+        self.assertIn((cl1.points["G"], cl1.points["H"]), cl1.inner_segments)
+        self.assertIn((cl1.points["I"], cl1.points["J"]), cl1.inner_segments)
+        self.assertEqual(cl1.target_arcs[0][0], cl1.points["K"])
+        self.assertEqual(cl1.target_arcs[0][2], cl1.points["L"])
+        self.assertEqual(cl1.inner_arcs[0][0], cl1.points["ZA"])
+        self.assertEqual(cl1.inner_arcs[0][2], cl1.points["ZB"])
+        self.assertIn((cl1.points["ZL"], cl1.points["ZM"]), cl1.inner_segments)
+        self.assertIn((cl1.points["ZM"], cl1.points["ZN"]), cl1.inner_segments)
+
+    def test_cl1_mn_and_zazb_arcs_preserve_columns_around_cl1_vias(self) -> None:
+        cfg = generator.build_config()
+        cl1 = generator.build_cl1_geometry(cfg)
+        assert cl1 is not None
+        expected_radius = generator.osc1_via_trace_clearance(cfg)
+        expected_inner_x = 35.5 - generator.trace_pitch(cfg)
+
+        for arc, via_label in (
+            (cl1.target_arcs[1], "ZE"),
+            (cl1.inner_arcs[0], "J"),
+        ):
+            center = cl1.points[via_label]
+            for point in arc:
+                self.assertAlmostEqual(generator.distance(point, center), expected_radius)
+            self.assertGreater(arc[1][0], center[0])
+        self.assertAlmostEqual(cl1.points["M"][0], expected_inner_x)
+        self.assertAlmostEqual(cl1.points["N"][0], 35.5)
+        self.assertAlmostEqual(cl1.points["ZA"][0], 35.5)
+        self.assertAlmostEqual(cl1.points["ZB"][0], expected_inner_x)
+
+    def test_cl1_quadrature_curves_preserve_spacing_across_sampled_runs(self) -> None:
+        cfg = generator.build_config()
+        dimensions = generator.calculate_dimensions(cfg)
+        cl1 = generator.build_cl1_geometry(cfg)
+        assert cl1 is not None
+        points = cl1.points
+        half_pitch = generator.trace_pitch(cfg) / 2.0
+        phase = 3.141592653589793 / 2.0
+        curve_pairs = (
+            (("E", "F", 1.0, half_pitch), ("V", "W", 1.0, -half_pitch)),
+            (("H", "I", 1.0, -half_pitch), ("Y", "Z", 1.0, half_pitch)),
+            (("O", "P", -1.0, -half_pitch), ("ZF", "ZG", -1.0, half_pitch)),
+            (("R", "S", -1.0, half_pitch), ("ZI", "ZJ", -1.0, -half_pitch)),
+        )
+        for first, second in curve_pairs:
+            first_path = generator.secondary_curve_segments(
+                cfg,
+                dimensions,
+                points[first[0]],
+                points[first[1]],
+                first[2],
+                first[3],
+                phase_offset_radians=phase,
+                mirror_phase_sign=False,
+            )
+            second_path = generator.secondary_curve_segments(
+                cfg,
+                dimensions,
+                points[second[0]],
+                points[second[1]],
+                second[2],
+                second[3],
+                phase_offset_radians=phase,
+                mirror_phase_sign=False,
+            )
+            self.assertGreaterEqual(
+                generator.path_to_path_distance(first_path, second_path) + 0.002,
+                generator.trace_pitch(cfg),
+            )
+
+    def test_cl1_bottom_layers_and_right_fanout_are_mirrored(self) -> None:
+        left = generator.build_cl1_geometry()
+        right = generator.build_cl1_geometry(
+            generator.build_config({"target_side": "bottom", "fanout_side": "right"})
+        )
+        assert left is not None and right is not None
+
+        self.assertEqual(right.target_layer, "B.Cu")
+        self.assertEqual(right.inner_layer, "In2.Cu")
+        self.assertEqual(right.crossover_layer, "In1.Cu")
+        for name in ("A", "C", "D", "J", "T", "U", "ZN"):
+            self.assertAlmostEqual(right.points[name][0], -left.points[name][0])
+            self.assertAlmostEqual(right.points[name][1], left.points[name][1])
+
+    def test_cl1_can_be_disabled_and_rejects_tight_primary_endpoint(self) -> None:
+        cfg = generator.build_config({"generate_cl1": False})
+        self.assertIsNone(generator.build_cl1_geometry(cfg))
+        self.assertNotIn('(pad "CL1" thru_hole', generator.render_footprint(cfg))
+
+        tight_cfg = generator.build_config({"primary_end_extension_mm": 0.1})
+        with self.assertRaisesRegex(ValueError, "CL1 endpoint"):
+            generator.build_cl1_geometry(tight_cfg)
 
 
 if __name__ == "__main__":
