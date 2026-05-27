@@ -396,6 +396,42 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertAlmostEqual(cl1.points["ZA"][0], 35.5)
         self.assertAlmostEqual(cl1.points["ZB"][0], expected_inner_x)
 
+    def test_cl1_zk_zl_arc_is_concentric_with_c_via(self) -> None:
+        cfg = generator.build_config()
+        cl1 = generator.build_cl1_geometry(cfg)
+        assert cl1 is not None
+        center = cl1.points["C"]
+        arc = cl1.inner_arcs[2]
+        expected_radius = generator.osc1_via_trace_clearance(cfg)
+
+        self.assertEqual(arc[0], cl1.points["ZK"])
+        self.assertEqual(arc[2], cl1.points["ZL"])
+        for point in arc:
+            self.assertAlmostEqual(generator.distance(point, center), expected_radius)
+        self.assertLess(arc[1][0], center[0])
+        self.assertLess(arc[1][1], center[1])
+
+    def test_cl1_kl_and_zczd_arcs_are_centered_on_column_with_cl2_clearance(self) -> None:
+        cfg = generator.build_config()
+        cl2 = generator.build_cl2_geometry(cfg)
+        cl1 = generator.build_cl1_geometry(cfg)
+        assert cl1 is not None and cl2 is not None
+        pitch = generator.trace_pitch(cfg)
+
+        for arc in (cl1.target_arcs[0], cl1.inner_arcs[1]):
+            center = (arc[0][0], (arc[0][1] + arc[2][1]) / 2.0)
+            radius = generator.distance(center, arc[0])
+            self.assertAlmostEqual(center[0], cl1.points["K"][0])
+            self.assertAlmostEqual(center[1], 0.0)
+            self.assertAlmostEqual(arc[1][0], center[0] + radius)
+            self.assertAlmostEqual(arc[1][1], center[1])
+            for label in ("J", "ZG"):
+                self.assertGreaterEqual(
+                    radius - generator.distance(center, cl2.points[label])
+                    + generator.GEOMETRY_TOLERANCE_MM,
+                    pitch,
+                )
+
     def test_cl1_quadrature_curves_preserve_spacing_across_sampled_runs(self) -> None:
         cfg = generator.build_config()
         dimensions = generator.calculate_dimensions(cfg)

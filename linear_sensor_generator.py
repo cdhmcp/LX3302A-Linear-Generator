@@ -1126,9 +1126,9 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     entry_b_x = terminal_x + abs(terminal_y - entrance_y)
     return_zm_x = terminal_x + abs(-terminal_y - entrance_y)
 
-    # Keep detour endpoints clear of both the CL2 endpoint vias and the
-    # adjoining sampled copper as the CL2 rails approach those vias.
-    cl2_crossing_half_height = via_clearance + half_pitch
+    # K-L and ZC-ZD are compact semicircles centered on this column. Their
+    # radius leaves one trace pitch to CL2 J/ZG at the adjacent end column.
+    cl2_crossing_half_height = math.hypot(pitch, half_pitch) + pitch
     points: dict[str, Point] = {
         "A": (terminal_x, terminal_y),
         "B": (entry_b_x, entrance_y),
@@ -1201,6 +1201,33 @@ def via_clearance_arc(cfg: dict, start: Point, end: Point, center: Point) -> Arc
     )
 
 
+def outside_semicircle_arc(cfg: dict, start: Point, end: Point) -> Arc:
+    """Return a sensor-end-facing semicircle centered on the endpoint column."""
+    center_y = (start[1] + end[1]) / 2.0
+    radius = abs(start[1] - center_y)
+    sensor_end_direction = -fanout_direction(cfg)
+    return (
+        start,
+        (start[0] + (sensor_end_direction * radius), center_y),
+        end,
+    )
+
+
+def lower_fanout_via_arc(cfg: dict, start: Point, end: Point, center: Point) -> Arc:
+    """Return the quarter circle from below a via toward its fanout side."""
+    radius = osc1_via_trace_clearance(cfg)
+    fanout_side = fanout_direction(cfg)
+    diagonal_radius = radius / math.sqrt(2.0)
+    return (
+        start,
+        (
+            center[0] + (fanout_side * diagonal_radius),
+            center[1] - diagonal_radius,
+        ),
+        end,
+    )
+
+
 def build_cl1_routes(
     cfg: dict,
     dimensions: SensorDimensions,
@@ -1220,7 +1247,6 @@ def build_cl1_routes(
     inner_arcs: list[Arc] = []
     half_pitch = trace_pitch(cfg) / 2.0
     phase_offset = math.pi / 2.0
-    side = fanout_direction(cfg)
 
     def line(collection: list[Segment], start: str, end: str) -> None:
         collection.append((points[start], points[end]))
@@ -1255,8 +1281,7 @@ def build_cl1_routes(
     curve(inner_segments, "H", "I", 1.0, -half_pitch)
     line(inner_segments, "I", "J")
     line(target_segments, "J", "K")
-    crossing_arc_bulge = -(side * (trace_pitch(cfg) + (3.0 * osc1_via_trace_clearance(cfg))))
-    target_arcs.append(bowed_arc(points["K"], points["L"], (crossing_arc_bulge, 0.0)))
+    target_arcs.append(outside_semicircle_arc(cfg, points["K"], points["L"]))
     line(target_segments, "L", "M")
     target_arcs.append(via_clearance_arc(cfg, points["M"], points["N"], points["ZE"]))
     line(target_segments, "N", "O")
@@ -1274,7 +1299,7 @@ def build_cl1_routes(
     line(inner_segments, "Z", "ZA")
     inner_arcs.append(via_clearance_arc(cfg, points["ZA"], points["ZB"], points["J"]))
     line(inner_segments, "ZB", "ZC")
-    inner_arcs.append(bowed_arc(points["ZC"], points["ZD"], (crossing_arc_bulge, 0.0)))
+    inner_arcs.append(outside_semicircle_arc(cfg, points["ZC"], points["ZD"]))
     line(inner_segments, "ZD", "ZE")
     line(target_segments, "ZE", "ZF")
     curve(target_segments, "ZF", "ZG", -1.0, half_pitch)
@@ -1282,9 +1307,7 @@ def build_cl1_routes(
     line(inner_segments, "ZH", "ZI")
     curve(inner_segments, "ZI", "ZJ", -1.0, -half_pitch)
     line(inner_segments, "ZJ", "ZK")
-    inner_arcs.append(
-        bowed_arc(points["ZK"], points["ZL"], (side * trace_pitch(cfg) / 2.0, -trace_pitch(cfg) / 2.0))
-    )
+    inner_arcs.append(lower_fanout_via_arc(cfg, points["ZK"], points["ZL"], points["C"]))
     line(inner_segments, "ZL", "ZM")
     line(inner_segments, "ZM", "ZN")
     return (
@@ -1345,6 +1368,7 @@ def validate_cl1_clearance(
     via_centered_arcs = (
         ("M-N", target_arcs[1], points["ZE"]),
         ("ZA-ZB", inner_arcs[0], points["J"]),
+        ("ZK-ZL", inner_arcs[2], points["C"]),
     )
     for name, arc, via_center in via_centered_arcs:
         for point in arc:
@@ -1355,6 +1379,18 @@ def validate_cl1_clearance(
                 raise ValueError(
                     f"CL1 {name} arc does not maintain clearance from its transition via."
                 )
+
+    if cl2_geometry is not None:
+        crossing_arcs = (("K-L", target_arcs[0]), ("ZC-ZD", inner_arcs[1]))
+        for name, arc in crossing_arcs:
+            center = (arc[0][0], (arc[0][1] + arc[2][1]) / 2.0)
+            radius = distance(center, arc[0])
+            for label in ("J", "ZG"):
+                radial_clearance = radius - distance(center, cl2_geometry.points[label])
+                if radial_clearance + GEOMETRY_TOLERANCE_MM < trace_pitch(cfg):
+                    raise ValueError(
+                        f"CL1 {name} arc violates clearance to CL2 {label}."
+                    )
 
     half_pitch = trace_pitch(cfg) / 2.0
     phase_offset = math.pi / 2.0
