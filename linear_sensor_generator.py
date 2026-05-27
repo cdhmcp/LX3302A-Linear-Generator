@@ -35,7 +35,7 @@ MAIN_PROPERTIES = {
 
     # Primary oscillator sizing
     "primary_end_extension_mm": 3.0,
-    "primary_y_margin_mm": 3.0,
+    "primary_y_margin_mm": 0.075,
     "number_of_primary_turns": 3,
 
     # Placement and output
