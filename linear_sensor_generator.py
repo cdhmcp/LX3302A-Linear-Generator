@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""KiCad footprint generator for LX3302A linear primary coil layouts.
+"""KiCad footprint generator for LX3302A linear sensor coil layouts.
 
 OSC1 and OSC2 are built from their annotated primary-coil point maps. Receiver
-dimensions remain in the configuration because the primary envelope is sized
-from the future CL1/CL2 sensing region.
+coil CL2 is built from its annotated two-turn sinusoidal point map.
 """
 
 from __future__ import annotations
@@ -48,8 +47,14 @@ MAIN_PROPERTIES = {
     "primary_input_pad_name": "VIN",
     "osc1_output_pad_name": "OSC1",
     "osc2_output_pad_name": "OSC2",
+    "cl2_output_pad_name": "CL2",
+    "cl2_return_pad_name": "CL2-GND",
     "generate_osc1": True,
     "generate_osc2": True,
+    "generate_cl2": True,
+
+    # CL2 is mapped for two turns in the current reference drawing.
+    "number_of_secondary_turns": 2,
 }
 
 
@@ -64,6 +69,9 @@ FINE_TUNING_PROPERTIES = {
     "via_diameter_mm": 20 * MIL_TO_MM,
     "terminal_escape_length_mm": 5.0,
     "osc1_vin_exit_offset_mm": 1.2,
+    "secondary_curve_samples_per_cycle": 128,
+    "secondary_jump_runup_via_multiplier": 3.0,
+    "secondary_jump_detour_via_multiplier": 0.35,
 }
 
 
@@ -97,6 +105,20 @@ class PrimaryGeometry:
     dimensions: SensorDimensions
     pads: dict[str, Point]
     coils: tuple[PrimaryCoil, ...]
+
+
+@dataclass(frozen=True)
+class SecondaryCoil:
+    """One receiver winding routed across its target-facing and inner layers."""
+
+    name: str
+    target_layer: str
+    inner_layer: str
+    stroke_length_mm: float
+    points: dict[str, Point]
+    target_segments: tuple[Segment, ...]
+    inner_segments: tuple[Segment, ...]
+    via_labels: tuple[str, ...]
 
 
 def build_config(overrides: dict | None = None) -> dict:
@@ -149,6 +171,15 @@ def target_facing_layer(cfg: dict) -> str:
     raise ValueError("target_side must be 'top' or 'bottom'.")
 
 
+def receiver_layers(cfg: dict) -> tuple[str, str]:
+    """Return ``(target-facing, inner)`` copper layers used by secondary coils."""
+    if cfg["target_side"] == "top":
+        return "F.Cu", "In1.Cu"
+    if cfg["target_side"] == "bottom":
+        return "B.Cu", "In2.Cu"
+    raise ValueError("target_side must be 'top' or 'bottom'.")
+
+
 def fanout_direction(cfg: dict) -> float:
     """Return -1 for a left breakout or +1 for a right breakout."""
     if cfg["fanout_side"] == "left":
@@ -192,6 +223,30 @@ def point_to_segment_distance(point: Point, segment: Segment) -> float:
     return distance(point, closest)
 
 
+def segment_to_segment_distance(first: Segment, second: Segment) -> float:
+    """Return the minimum distance between two non-crossing copper segments."""
+    return min(
+        point_to_segment_distance(first[0], second),
+        point_to_segment_distance(first[1], second),
+        point_to_segment_distance(second[0], first),
+        point_to_segment_distance(second[1], first),
+    )
+
+
+def path_to_path_distance(first: tuple[Segment, ...], second: tuple[Segment, ...]) -> float:
+    """Return the closest segment distance between two sampled paths."""
+    return min(
+        segment_to_segment_distance(first_segment, second_segment)
+        for first_segment in first
+        for second_segment in second
+    )
+
+
+def cl2_stroke_length(cfg: dict) -> float:
+    """Return the active CL2 waveform span from the mapped stroke definition."""
+    return cfg["measurement_range_mm"] + cfg["target_x_mm"]
+
+
 def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> None:
     """Reject impossible envelope, fabrication, or breakout inputs."""
     positive_values = (
@@ -207,6 +262,8 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         "via_diameter_mm",
         "terminal_escape_length_mm",
         "osc1_vin_exit_offset_mm",
+        "secondary_jump_runup_via_multiplier",
+        "secondary_jump_detour_via_multiplier",
     )
     for name in positive_values:
         if cfg[name] <= 0:
@@ -219,10 +276,23 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         raise ValueError("number_of_primary_turns must be a positive integer.")
     if not isinstance(cfg["generate_osc1"], bool) or not isinstance(cfg["generate_osc2"], bool):
         raise ValueError("generate_osc1 and generate_osc2 must be booleans.")
+    if not isinstance(cfg["generate_cl2"], bool):
+        raise ValueError("generate_cl2 must be a boolean.")
     if cfg["generate_osc2"] and not cfg["generate_osc1"]:
         raise ValueError("OSC2 requires OSC1 because it shares OSC1's VIN transition via.")
+    if (
+        not isinstance(cfg["number_of_secondary_turns"], int)
+        or cfg["number_of_secondary_turns"] != 2
+    ):
+        raise ValueError("CL2 currently supports exactly two secondary turns.")
+    if (
+        not isinstance(cfg["secondary_curve_samples_per_cycle"], int)
+        or cfg["secondary_curve_samples_per_cycle"] < 16
+    ):
+        raise ValueError("secondary_curve_samples_per_cycle must be an integer >= 16.")
 
     primary_layers(cfg)
+    receiver_layers(cfg)
     fanout_direction(cfg)
     dimensions = dimensions or calculate_dimensions(cfg)
 
@@ -545,6 +615,379 @@ def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
     )
 
 
+def secondary_wave_value_and_slope(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    x: float,
+    phase_sign: float,
+) -> tuple[float, float]:
+    """Return the shared CL2 sinusoid centerline and its slope at ``x``."""
+    span = cl2_stroke_length(cfg)
+    amplitude = (dimensions.secondary_width_mm / 2.0) - (trace_pitch(cfg) / 2.0)
+    angle = (2.0 * math.pi * (x + (span / 2.0))) / span
+    return (
+        phase_sign * amplitude * math.sin(angle),
+        phase_sign * amplitude * (2.0 * math.pi / span) * math.cos(angle),
+    )
+
+
+def secondary_rail_point(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    station_x: float,
+    phase_sign: float,
+    rail_offset: float,
+) -> Point:
+    """Offset one CL2 waveform rail perpendicular to the common sine centerline."""
+    y, slope = secondary_wave_value_and_slope(cfg, dimensions, station_x, phase_sign)
+    normal_scale = math.hypot(slope, 1.0)
+    return (
+        station_x - ((slope / normal_scale) * rail_offset),
+        y + (rail_offset / normal_scale),
+    )
+
+
+def secondary_curve_segments(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    start: Point,
+    end: Point,
+    phase_sign: float,
+    rail_offset: float,
+    reference_start: Point | None = None,
+    reference_end: Point | None = None,
+    station_start_x: float | None = None,
+    station_end_x: float | None = None,
+) -> tuple[Segment, ...]:
+    """Sample part of a full-span sine rail while connecting mapped transition points."""
+    stroke_length = cl2_stroke_length(cfg)
+    effective_phase = phase_sign * -fanout_direction(cfg)
+    reference_start = start if reference_start is None else reference_start
+    reference_end = end if reference_end is None else reference_end
+    station_start_x = start[0] if station_start_x is None else station_start_x
+    station_end_x = end[0] if station_end_x is None else station_end_x
+    sample_count = max(
+        2,
+        round(
+            cfg["secondary_curve_samples_per_cycle"]
+            * abs(station_end_x - station_start_x)
+            / stroke_length
+        ),
+    )
+    raw_start = secondary_rail_point(
+        cfg, dimensions, reference_start[0], effective_phase, rail_offset
+    )
+    raw_end = secondary_rail_point(
+        cfg, dimensions, reference_end[0], effective_phase, rail_offset
+    )
+    points: list[Point] = []
+    for index in range(sample_count + 1):
+        fraction = index / sample_count
+        station_x = station_start_x + ((station_end_x - station_start_x) * fraction)
+        reference_fraction = (station_x - reference_start[0]) / (
+            reference_end[0] - reference_start[0]
+        )
+        raw_point = secondary_rail_point(
+            cfg, dimensions, station_x, effective_phase, rail_offset
+        )
+        points.append(
+            (
+                raw_point[0]
+                + ((reference_start[0] - raw_start[0]) * (1.0 - reference_fraction))
+                + ((reference_end[0] - raw_end[0]) * reference_fraction),
+                raw_point[1]
+                + ((reference_start[1] - raw_start[1]) * (1.0 - reference_fraction))
+                + ((reference_end[1] - raw_end[1]) * reference_fraction),
+            )
+        )
+    return tuple(zip(points, points[1:]))
+
+
+def secondary_corrected_rail_point(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    station_x: float,
+    phase_sign: float,
+    rail_offset: float,
+    reference_start: Point,
+    reference_end: Point,
+) -> Point:
+    """Return a point on a full corrected rail before fanout-side mirroring."""
+    raw_start = secondary_rail_point(
+        cfg, dimensions, reference_start[0], phase_sign, rail_offset
+    )
+    raw_end = secondary_rail_point(
+        cfg, dimensions, reference_end[0], phase_sign, rail_offset
+    )
+    raw_point = secondary_rail_point(cfg, dimensions, station_x, phase_sign, rail_offset)
+    fraction = (station_x - reference_start[0]) / (reference_end[0] - reference_start[0])
+    return (
+        raw_point[0]
+        + ((reference_start[0] - raw_start[0]) * (1.0 - fraction))
+        + ((reference_end[0] - raw_end[0]) * fraction),
+        raw_point[1]
+        + ((reference_start[1] - raw_start[1]) * (1.0 - fraction))
+        + ((reference_end[1] - raw_end[1]) * fraction),
+    )
+
+
+def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Point]:
+    """Construct the annotated two-turn CL2 point map in a left-entry frame."""
+    half_span = cl2_stroke_length(cfg) / 2.0
+    quarter_span = half_span / 2.0
+    amplitude = dimensions.secondary_width_mm / 2.0
+    pitch = trace_pitch(cfg)
+    via_pair_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    runup = cfg["secondary_jump_runup_via_multiplier"] * cfg["via_diameter_mm"]
+    detour = cfg["secondary_jump_detour_via_multiplier"] * cfg["via_diameter_mm"]
+    terminal_x = -(dimensions.primary_length_mm / 2.0) - cfg["terminal_escape_length_mm"]
+    terminal_fanout = 3.0 * via_pair_spacing
+    _, midpoint_slope = secondary_wave_value_and_slope(cfg, dimensions, -half_span, -1.0)
+    midpoint_horizontal_spacing = (
+        pitch * math.hypot(midpoint_slope, 1.0) / abs(midpoint_slope)
+    )
+
+    points: dict[str, Point] = {
+        # Provisional IC-side fanout, kept outside the primary boundary.
+        "A": (terminal_x, terminal_fanout),
+        "B": (terminal_x + terminal_fanout, 0.0),
+        "C": (-half_span, 0.0),
+        # First forward pass.
+        "D": (-quarter_span + (via_pair_spacing / 2.0), -amplitude),
+        "E": (-quarter_span + (via_pair_spacing / 2.0), -amplitude + via_pair_spacing),
+        "F": (-quarter_span + (via_pair_spacing / 2.0), -amplitude + pitch),
+        "G": (quarter_span + (via_pair_spacing / 2.0), amplitude),
+        "H": (quarter_span + (via_pair_spacing / 2.0), amplitude - via_pair_spacing),
+        "I": (quarter_span + (via_pair_spacing / 2.0), amplitude - pitch),
+        "J": (half_span, -(pitch / 2.0)),
+        # First reverse pass.
+        "N": (quarter_span - (via_pair_spacing / 2.0), -amplitude),
+        "O": (quarter_span - (via_pair_spacing / 2.0), -amplitude + via_pair_spacing),
+        "P": (quarter_span - (via_pair_spacing / 2.0), -amplitude + pitch),
+        "Q": (-quarter_span - (via_pair_spacing / 2.0), amplitude),
+        "R": (-quarter_span - (via_pair_spacing / 2.0), amplitude - via_pair_spacing),
+        "S": (-quarter_span - (via_pair_spacing / 2.0), amplitude - pitch),
+        "W": (-half_span + midpoint_horizontal_spacing, 0.0),
+        # Second forward pass.
+        "X": (-quarter_span - (via_pair_spacing / 2.0), -amplitude + pitch),
+        "Y": (-quarter_span - (via_pair_spacing / 2.0), -amplitude + via_pair_spacing),
+        "Z": (-quarter_span - (via_pair_spacing / 2.0), -amplitude),
+        "ZA": (quarter_span - (via_pair_spacing / 2.0), amplitude - pitch),
+        "ZB": (quarter_span - (via_pair_spacing / 2.0), amplitude - via_pair_spacing),
+        "ZC": (quarter_span - (via_pair_spacing / 2.0), amplitude),
+        "ZG": (half_span, pitch / 2.0),
+        # Second reverse pass and terminal escape.
+        "ZH": (quarter_span + (via_pair_spacing / 2.0), -amplitude + pitch),
+        "ZI": (quarter_span + (via_pair_spacing / 2.0), -amplitude + via_pair_spacing),
+        "ZJ": (quarter_span + (via_pair_spacing / 2.0), -amplitude),
+        "ZK": (-quarter_span + (via_pair_spacing / 2.0), amplitude - pitch),
+        "ZL": (-quarter_span + (via_pair_spacing / 2.0), amplitude - via_pair_spacing),
+        "ZM": (-quarter_span + (via_pair_spacing / 2.0), amplitude),
+        "ZN": (-half_span, 0.0),
+        "ZO": (terminal_x + terminal_fanout, 0.0),
+        "ZP": (terminal_x, -terminal_fanout),
+    }
+
+    points["K"] = secondary_rail_point(
+        cfg, dimensions, points["J"][0] - runup, 1.0, -(pitch / 2.0)
+    )
+    points["L"] = (points["K"][0], points["K"][1] - detour)
+    points["M"] = points["K"]
+
+    t_station_x = points["W"][0] + runup
+    points["T"] = secondary_corrected_rail_point(
+        cfg,
+        dimensions,
+        t_station_x,
+        1.0,
+        -(pitch / 2.0),
+        points["S"],
+        points["W"],
+    )
+    points["U"] = (points["T"][0], points["T"][1] - detour)
+    points["V"] = points["T"]
+
+    points["ZD"] = secondary_rail_point(
+        cfg, dimensions, points["ZG"][0] - runup, -1.0, pitch / 2.0
+    )
+    points["ZE"] = (points["ZD"][0], points["ZD"][1] + detour)
+    points["ZF"] = points["ZD"]
+
+    if fanout_direction(cfg) > 0:
+        points = {label: (-point[0], point[1]) for label, point in points.items()}
+    return points
+
+
+def build_cl2_segments(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    points: dict[str, Point],
+) -> tuple[tuple[Segment, ...], tuple[Segment, ...]]:
+    """Return CL2 copper segments assigned to its two receiver layers."""
+    target_segments: list[Segment] = []
+    inner_segments: list[Segment] = []
+
+    def line(collection: list[Segment], start: str, end: str) -> None:
+        collection.append((points[start], points[end]))
+
+    half_pitch = trace_pitch(cfg) / 2.0
+
+    def curve(
+        collection: list[Segment],
+        start: str,
+        end: str,
+        phase_sign: float,
+        rail_offset: float,
+        reference: tuple[str, str] | None = None,
+        stations: tuple[float, float] | None = None,
+    ) -> None:
+        reference_start = None if reference is None else points[reference[0]]
+        reference_end = None if reference is None else points[reference[1]]
+        collection.extend(
+            secondary_curve_segments(
+                cfg,
+                dimensions,
+                points[start],
+                points[end],
+                phase_sign,
+                rail_offset,
+                reference_start,
+                reference_end,
+                None if stations is None else stations[0],
+                None if stations is None else stations[1],
+            )
+        )
+
+    line(target_segments, "A", "B")
+    line(target_segments, "B", "C")
+    curve(target_segments, "C", "D", -1.0, -half_pitch)
+    line(target_segments, "D", "E")
+    line(inner_segments, "E", "F")
+    curve(inner_segments, "F", "G", -1.0, half_pitch)
+    line(inner_segments, "G", "H")
+    line(target_segments, "H", "I")
+    curve(target_segments, "I", "J", -1.0, -half_pitch)
+    curve(target_segments, "J", "K", 1.0, -half_pitch)
+    line(target_segments, "K", "L")
+    line(inner_segments, "L", "M")
+    curve(inner_segments, "M", "N", 1.0, -half_pitch)
+    line(inner_segments, "N", "O")
+    line(target_segments, "O", "P")
+    curve(target_segments, "P", "Q", 1.0, half_pitch)
+    line(target_segments, "Q", "R")
+    line(inner_segments, "R", "S")
+    u_transition_station_x = (
+        points["W"][0]
+        - (
+            fanout_direction(cfg)
+            * cfg["secondary_jump_runup_via_multiplier"]
+            * cfg["via_diameter_mm"]
+        )
+    )
+    curve(
+        inner_segments,
+        "S",
+        "T",
+        1.0,
+        -half_pitch,
+        ("S", "W"),
+        (points["S"][0], u_transition_station_x),
+    )
+    line(inner_segments, "T", "U")
+    line(target_segments, "U", "V")
+    curve(
+        target_segments,
+        "V",
+        "W",
+        1.0,
+        -half_pitch,
+        ("S", "W"),
+        (u_transition_station_x, points["W"][0]),
+    )
+    curve(target_segments, "W", "X", -1.0, half_pitch)
+    line(target_segments, "X", "Y")
+    line(inner_segments, "Y", "Z")
+    curve(inner_segments, "Z", "ZA", -1.0, -half_pitch)
+    line(inner_segments, "ZA", "ZB")
+    line(target_segments, "ZB", "ZC")
+    curve(target_segments, "ZC", "ZD", -1.0, half_pitch)
+    line(target_segments, "ZD", "ZE")
+    line(inner_segments, "ZE", "ZF")
+    curve(inner_segments, "ZF", "ZG", -1.0, half_pitch)
+    curve(inner_segments, "ZG", "ZH", 1.0, half_pitch)
+    line(inner_segments, "ZH", "ZI")
+    line(target_segments, "ZI", "ZJ")
+    curve(target_segments, "ZJ", "ZK", 1.0, -half_pitch)
+    line(target_segments, "ZK", "ZL")
+    line(inner_segments, "ZL", "ZM")
+    curve(inner_segments, "ZM", "ZN", 1.0, half_pitch)
+    line(inner_segments, "ZN", "ZO")
+    line(inner_segments, "ZO", "ZP")
+    return tuple(target_segments), tuple(inner_segments)
+
+
+def validate_cl2_clearance(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    primary_geometry: PrimaryGeometry,
+    points: dict[str, Point],
+) -> None:
+    """Validate mapped CL2 terminal and paired-via clearance constraints."""
+    minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    for first, second in (("E", "Y"), ("H", "ZB"), ("O", "ZI"), ("R", "ZL")):
+        if distance(points[first], points[second]) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance:
+            raise ValueError(f"CL2 paired vias {first}/{second} violate plated via clearance.")
+
+    primary_pads = tuple(primary_geometry.pads.values())
+    for terminal in ("A", "ZP"):
+        for primary_pad in primary_pads:
+            if distance(points[terminal], primary_pad) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance:
+                raise ValueError(f"CL2 terminal {terminal} collides with a primary via.")
+
+    pitch = trace_pitch(cfg)
+    half_pitch = pitch / 2.0
+    polygonal_tolerance = 0.001
+    parallel_paths = (
+        (
+            secondary_curve_segments(cfg, dimensions, points["F"], points["G"], -1.0, half_pitch),
+            secondary_curve_segments(cfg, dimensions, points["Z"], points["ZA"], -1.0, -half_pitch),
+        ),
+        (
+            secondary_curve_segments(cfg, dimensions, points["P"], points["Q"], 1.0, half_pitch),
+            secondary_curve_segments(cfg, dimensions, points["ZJ"], points["ZK"], 1.0, -half_pitch),
+        ),
+    )
+    for first, second in parallel_paths:
+        if path_to_path_distance(first, second) + polygonal_tolerance < pitch:
+            raise ValueError("CL2 parallel sinusoidal traces violate configured spacing.")
+
+
+def build_cl2_geometry(
+    cfg: dict | None = None,
+    primary_geometry: PrimaryGeometry | None = None,
+) -> SecondaryCoil | None:
+    """Build the two-turn CL2 receiver coil, or return ``None`` when disabled."""
+    cfg = build_config() if cfg is None else cfg
+    if not cfg["generate_cl2"]:
+        return None
+    dimensions = calculate_dimensions(cfg)
+    validate_config(cfg, dimensions)
+    primary_geometry = primary_geometry or build_primary_geometry(cfg)
+    points = build_cl2_point_map(cfg, dimensions)
+    target_segments, inner_segments = build_cl2_segments(cfg, dimensions, points)
+    validate_cl2_clearance(cfg, dimensions, primary_geometry, points)
+    return SecondaryCoil(
+        name="CL2",
+        target_layer=receiver_layers(cfg)[0],
+        inner_layer=receiver_layers(cfg)[1],
+        stroke_length_mm=cl2_stroke_length(cfg),
+        points=points,
+        target_segments=target_segments,
+        inner_segments=inner_segments,
+        via_labels=("A", "E", "H", "L", "O", "R", "U", "Y", "ZB", "ZE", "ZI", "ZL", "ZP"),
+    )
+
+
 def fp_line(start: Point, end: Point, width: float, layer: str) -> str:
     return f'''  (fp_line (start {start[0]:.6f} {start[1]:.6f}) (end {end[0]:.6f} {end[1]:.6f})
     (stroke (width {width:.6f}) (type solid)) (layer "{layer}"))\n'''
@@ -573,9 +1016,10 @@ def fp_text(reference: str, value: str) -> str:
 
 
 def render_footprint(cfg: dict | None = None) -> str:
-    """Render the configured primary-only KiCad footprint text."""
+    """Render the configured KiCad sensor footprint text."""
     cfg = build_config() if cfg is None else cfg
     geometry = build_primary_geometry(cfg)
+    cl2_geometry = build_cl2_geometry(cfg, geometry)
     sections = [
         kicad_header(cfg["footprint_name"]),
         fp_text(cfg["reference_text"], cfg["footprint_name"]),
@@ -627,6 +1071,29 @@ def render_footprint(cfg: dict | None = None) -> str:
         for segment in coil.body_segments:
             sections.append(fp_line(segment[0], segment[1], cfg["trace_width_mm"], coil.layer))
 
+    if cl2_geometry is not None:
+        for segment in cl2_geometry.target_segments:
+            sections.append(
+                fp_line(segment[0], segment[1], cfg["trace_width_mm"], cl2_geometry.target_layer)
+            )
+        for segment in cl2_geometry.inner_segments:
+            sections.append(
+                fp_line(segment[0], segment[1], cfg["trace_width_mm"], cl2_geometry.inner_layer)
+            )
+        for label in cl2_geometry.via_labels:
+            pad_name = {
+                "A": cfg["cl2_output_pad_name"],
+                "ZP": cfg["cl2_return_pad_name"],
+            }.get(label, f"CL2_{label}")
+            sections.append(
+                pad_thru_hole(
+                    pad_name,
+                    cl2_geometry.points[label],
+                    cfg["via_diameter_mm"],
+                    cfg["via_hole_size_mm"],
+                )
+            )
+
     sections.append(")\n")
     return "".join(sections)
 
@@ -644,6 +1111,7 @@ def write_linear_sensor_footprint(cfg: dict | None = None) -> Path:
 def main() -> None:
     cfg = build_config()
     geometry = build_primary_geometry(cfg)
+    cl2_geometry = build_cl2_geometry(cfg, geometry)
     output_path = write_linear_sensor_footprint(cfg)
     dims = geometry.dimensions
     print(f"Wrote {output_path}")
@@ -651,6 +1119,8 @@ def main() -> None:
         "Primary outer centerline envelope: "
         f"{dims.primary_length_mm:.3f} mm x {dims.primary_width_mm:.3f} mm"
     )
+    if cl2_geometry is not None:
+        print(f"CL2 active waveform span: {cl2_geometry.stroke_length_mm:.3f} mm")
 
 
 if __name__ == "__main__":

@@ -9,9 +9,9 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         osc1, osc2 = geometry.coils
 
         self.assertEqual(geometry.dimensions.secondary_period_mm, 42.0)
-        self.assertEqual(geometry.dimensions.secondary_length_mm, 91.0)
+        self.assertEqual(geometry.dimensions.secondary_length_mm, 72.0)
         self.assertEqual(geometry.dimensions.secondary_width_mm, 5.5)
-        self.assertEqual(geometry.dimensions.primary_length_mm, 97.0)
+        self.assertEqual(geometry.dimensions.primary_length_mm, 78.0)
         self.assertEqual(geometry.dimensions.primary_width_mm, 11.5)
         self.assertEqual(osc1.name, "OSC1")
         self.assertEqual(osc1.layer, "B.Cu")
@@ -65,7 +65,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(points["U"][1], -1.2)
         self.assertEqual(points["V"][1], -1.2)
 
-    def test_default_footprint_emits_osc1_osc2_and_two_vin_vias(self) -> None:
+    def test_default_footprint_emits_oscillators_cl2_and_two_vin_vias(self) -> None:
         footprint = generator.render_footprint()
 
         self.assertIn('(pad "OSC1" thru_hole', footprint)
@@ -74,6 +74,9 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertIn('(layer "B.Cu")', footprint)
         self.assertIn('(layer "F.Cu")', footprint)
         self.assertIn('(layer "In2.Cu")', footprint)
+        self.assertIn('(pad "CL2" thru_hole', footprint)
+        self.assertIn('(pad "CL2-GND" thru_hole', footprint)
+        self.assertIn('(layer "In1.Cu")', footprint)
 
     def test_bottom_target_mirrors_primary_and_escape_layers(self) -> None:
         cfg = generator.build_config({"target_side": "bottom"})
@@ -165,6 +168,158 @@ class LinearSensorGeneratorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "OSC2 requires OSC1"):
             generator.build_primary_geometry(cfg)
+
+    def test_default_cl2_span_layers_and_outer_extrema(self) -> None:
+        cl2 = generator.build_cl2_geometry()
+        self.assertIsNotNone(cl2)
+        assert cl2 is not None
+
+        self.assertEqual(cl2.target_layer, "F.Cu")
+        self.assertEqual(cl2.inner_layer, "In1.Cu")
+        self.assertEqual(cl2.stroke_length_mm, 71.0)
+        self.assertEqual(cl2.points["C"], (-35.5, 0.0))
+        self.assertEqual(cl2.points["J"][0], 35.5)
+        self.assertEqual(cl2.points["ZN"], cl2.points["C"])
+        self.assertEqual(cl2.points["D"][1], -2.75)
+        self.assertEqual(cl2.points["G"][1], 2.75)
+
+    def test_cl2_corrected_u_layer_jump_and_continuity_anchors(self) -> None:
+        cfg = generator.build_config()
+        dimensions = generator.calculate_dimensions(cfg)
+        cl2 = generator.build_cl2_geometry()
+        assert cl2 is not None
+        points = cl2.points
+        half_pitch = generator.trace_pitch(cfg) / 2.0
+
+        self.assertIn((points["T"], points["U"]), cl2.inner_segments)
+        self.assertIn((points["U"], points["V"]), cl2.target_segments)
+        self.assertEqual(points["T"], points["V"])
+        transition_station_x = (
+            points["W"][0]
+            - (
+                generator.fanout_direction(cfg)
+                * cfg["secondary_jump_runup_via_multiplier"]
+                * cfg["via_diameter_mm"]
+            )
+        )
+        expected_t = generator.secondary_corrected_rail_point(
+            cfg,
+            dimensions,
+            transition_station_x,
+            1.0,
+            -half_pitch,
+            points["S"],
+            points["W"],
+        )
+        self.assertEqual(points["T"], expected_t)
+        self.assertTrue(any(start == points["S"] for start, _ in cl2.inner_segments))
+        self.assertTrue(any(end == points["T"] for _, end in cl2.inner_segments))
+        self.assertTrue(any(start == points["V"] for start, _ in cl2.target_segments))
+        self.assertTrue(any(end == points["W"] for _, end in cl2.target_segments))
+        self.assertIn((points["ZN"], points["ZO"]), cl2.inner_segments)
+        self.assertIn((points["ZO"], points["ZP"]), cl2.inner_segments)
+        inner_curve = generator.secondary_curve_segments(
+            cfg,
+            dimensions,
+            points["S"],
+            points["T"],
+            1.0,
+            -half_pitch,
+            points["S"],
+            points["W"],
+            points["S"][0],
+            transition_station_x,
+        )
+        target_curve = generator.secondary_curve_segments(
+            cfg,
+            dimensions,
+            points["V"],
+            points["W"],
+            1.0,
+            -half_pitch,
+            points["S"],
+            points["W"],
+            transition_station_x,
+            points["W"][0],
+        )
+        self.assertEqual(inner_curve[-1][1], points["T"])
+        self.assertEqual(target_curve[0][0], points["V"])
+
+    def test_cl2_paired_vias_use_annular_clearance_spacing(self) -> None:
+        cfg = generator.build_config()
+        cl2 = generator.build_cl2_geometry(cfg)
+        assert cl2 is not None
+        expected_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+        pitch = generator.trace_pitch(cfg)
+
+        for first, second in (("E", "Y"), ("H", "ZB"), ("O", "ZI"), ("R", "ZL")):
+            self.assertAlmostEqual(
+                generator.distance(cl2.points[first], cl2.points[second]),
+                expected_spacing,
+            )
+        self.assertEqual(cl2.points["ZC"][1], cl2.points["G"][1])
+        self.assertAlmostEqual(cl2.points["ZC"][1] - cl2.points["ZA"][1], pitch)
+        self.assertAlmostEqual(cl2.points["ZG"][1] - cl2.points["J"][1], pitch)
+        self.assertAlmostEqual(cl2.points["ZG"][1], -(cl2.points["J"][1]))
+
+    def test_cl2_long_parallel_sinusoidal_rails_preserve_pitch(self) -> None:
+        cfg = generator.build_config()
+        dimensions = generator.calculate_dimensions(cfg)
+        cl2 = generator.build_cl2_geometry(cfg)
+        assert cl2 is not None
+        points = cl2.points
+        half_pitch = generator.trace_pitch(cfg) / 2.0
+
+        parallel_pairs = (
+            (
+                generator.secondary_curve_segments(
+                    cfg, dimensions, points["F"], points["G"], -1.0, half_pitch
+                ),
+                generator.secondary_curve_segments(
+                    cfg, dimensions, points["Z"], points["ZA"], -1.0, -half_pitch
+                ),
+            ),
+            (
+                generator.secondary_curve_segments(
+                    cfg, dimensions, points["P"], points["Q"], 1.0, half_pitch
+                ),
+                generator.secondary_curve_segments(
+                    cfg, dimensions, points["ZJ"], points["ZK"], 1.0, -half_pitch
+                ),
+            ),
+        )
+        for first, second in parallel_pairs:
+            self.assertGreaterEqual(
+                generator.path_to_path_distance(first, second) + 0.001,
+                generator.trace_pitch(cfg),
+            )
+
+    def test_cl2_bottom_layers_and_right_fanout_are_mirrored(self) -> None:
+        left = generator.build_cl2_geometry()
+        right = generator.build_cl2_geometry(
+            generator.build_config({"target_side": "bottom", "fanout_side": "right"})
+        )
+        assert left is not None and right is not None
+
+        self.assertEqual(right.target_layer, "B.Cu")
+        self.assertEqual(right.inner_layer, "In2.Cu")
+        for name in ("A", "C", "D", "J", "U", "ZP"):
+            self.assertAlmostEqual(right.points[name][0], -left.points[name][0])
+            self.assertAlmostEqual(right.points[name][1], left.points[name][1])
+
+    def test_cl2_can_be_disabled_independently(self) -> None:
+        cfg = generator.build_config({"generate_cl2": False})
+
+        self.assertIsNone(generator.build_cl2_geometry(cfg))
+        self.assertNotIn('(pad "CL2" thru_hole', generator.render_footprint(cfg))
+
+    def test_cl2_rejects_unmapped_turn_counts_and_coarse_sampling(self) -> None:
+        with self.assertRaisesRegex(ValueError, "exactly two secondary turns"):
+            generator.build_cl2_geometry(generator.build_config({"number_of_secondary_turns": 3}))
+        with self.assertRaisesRegex(ValueError, "integer >= 16"):
+            generator.build_cl2_geometry(
+                generator.build_config({"secondary_curve_samples_per_cycle": 8})
+            )
 
 
 if __name__ == "__main__":
