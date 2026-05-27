@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """KiCad footprint generator for LX3302A linear primary coil layouts.
 
-OSC1 is implemented first from the annotated bottom-layer point map. Receiver
+OSC1 and OSC2 are built from their annotated primary-coil point maps. Receiver
 dimensions remain in the configuration because the primary envelope is sized
 from the future CL1/CL2 sensing region.
 """
@@ -14,6 +14,7 @@ from pathlib import Path
 
 
 MIL_TO_MM = 0.0254
+GEOMETRY_TOLERANCE_MM = 1e-9
 
 Point = tuple[float, float]
 Segment = tuple[Point, Point]
@@ -48,7 +49,7 @@ MAIN_PROPERTIES = {
     "osc1_output_pad_name": "OSC1",
     "osc2_output_pad_name": "OSC2",
     "generate_osc1": True,
-    "generate_osc2": False,
+    "generate_osc2": True,
 }
 
 
@@ -218,8 +219,8 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         raise ValueError("number_of_primary_turns must be a positive integer.")
     if not isinstance(cfg["generate_osc1"], bool) or not isinstance(cfg["generate_osc2"], bool):
         raise ValueError("generate_osc1 and generate_osc2 must be booleans.")
-    if cfg["generate_osc2"]:
-        raise ValueError("OSC2 generation is deferred until its point map is defined.")
+    if cfg["generate_osc2"] and not cfg["generate_osc1"]:
+        raise ValueError("OSC2 requires OSC1 because it shares OSC1's VIN transition via.")
 
     primary_layers(cfg)
     fanout_direction(cfg)
@@ -336,6 +337,103 @@ def build_osc1_segments(
     return body, ((points["U"], points["V"]),)
 
 
+def osc2_turn_labels(turn_index: int) -> tuple[str, str, str, str]:
+    """Return OSC2 labels for one overlaid perimeter in point-map order."""
+    point_map_labels = (
+        ("G", "OUTER_TOP_FAR", "OUTER_BOTTOM_FAR", "J"),
+        ("M", "MIDDLE_TOP_FAR", "MIDDLE_BOTTOM_FAR", "P"),
+        ("S", "INNER_TOP_FAR", "INNER_BOTTOM_FAR", "V"),
+    )
+    if turn_index < len(point_map_labels):
+        return point_map_labels[turn_index]
+    turn_number = turn_index + 1
+    return (
+        f"OSC2_TURN{turn_number}_START",
+        f"OSC2_TURN{turn_number}_TOP_FAR",
+        f"OSC2_TURN{turn_number}_BOTTOM_FAR",
+        f"OSC2_TURN{turn_number}_END",
+    )
+
+
+def osc2_transition_labels(turn_index: int) -> tuple[str, str]:
+    """Return the labels between an overlaid OSC2 perimeter and the next one."""
+    point_map_labels = (("K", "L"), ("Q", "R"))
+    if turn_index < len(point_map_labels):
+        return point_map_labels[turn_index]
+    turn_number = turn_index + 1
+    return (
+        f"OSC2_AFTER_TURN{turn_number}_NEAR",
+        f"OSC2_AFTER_TURN{turn_number}_INNER",
+    )
+
+
+def build_osc2_point_map(
+    cfg: dict,
+    osc1_points: dict[str, Point],
+) -> dict[str, Point]:
+    """Construct OSC2 from its mapped entry, overlaid turns, and shared VIN via."""
+    side = fanout_direction(cfg)
+    pitch = trace_pitch(cfg)
+    junction_separation = parallel_45_junction_separation(cfg)
+    via_clearance = osc1_via_trace_clearance(cfg)
+    pad_clearance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    turn_count = cfg["number_of_primary_turns"]
+    outer_x = osc1_points[osc1_turn_labels(0)[1]][0]
+
+    # Join the midpoint entry after clearing OSC1's through-via at A.
+    b_x = osc1_points["A"][0] - (side * via_clearance * math.sqrt(2.0))
+    points: dict[str, Point] = {
+        "A": (b_x + (side * pad_clearance), pad_clearance),
+        "B": (b_x, 0.0),
+        "C": (outer_x + (side * 2.0 * pitch), 0.0),
+        "X": osc1_points["U"],
+    }
+
+    # Overlay each OSC1 rectangular perimeter in the opposite traversal order.
+    near_x: list[float] = []
+    for turn in range(turn_count):
+        osc1_labels = osc1_turn_labels(turn)
+        osc2_labels = osc2_turn_labels(turn)
+        source_labels = (
+            osc1_labels[4],
+            osc1_labels[3],
+            osc1_labels[2],
+            osc1_labels[1],
+        )
+        for osc2_label, osc1_label in zip(osc2_labels, source_labels):
+            points[osc2_label] = osc1_points[osc1_label]
+        near_x.append(osc1_points[osc1_labels[1]][0])
+
+    # Work backward from shared VIN so the independent 45 degree transitions
+    # retain legal pitch as more turns are added.
+    points["W"] = (near_x[-1], points["X"][1] + via_clearance)
+    transition_tail_y = points["W"][1]
+    for turn in reversed(range(turn_count - 1)):
+        near_label, inner_label = osc2_transition_labels(turn)
+        points[inner_label] = (near_x[turn + 1], transition_tail_y - junction_separation)
+        points[near_label] = (near_x[turn], points[inner_label][1] + pitch)
+        transition_tail_y = points[near_label][1]
+
+    points["F"] = (outer_x, transition_tail_y - junction_separation)
+    points["E"] = (outer_x + (side * pitch), points["F"][1] + pitch)
+    points["D"] = (points["E"][0], -pitch)
+    return points
+
+
+def build_osc2_segments(cfg: dict, points: dict[str, Point]) -> tuple[Segment, ...]:
+    """Return OSC2 path in alphabetical point-map order, with hidden far corners."""
+    point_sequence = ["A", "B", "C", "D", "E", "F"]
+    for turn in range(cfg["number_of_primary_turns"]):
+        point_sequence.extend(osc2_turn_labels(turn))
+        if turn < cfg["number_of_primary_turns"] - 1:
+            point_sequence.extend(osc2_transition_labels(turn))
+    point_sequence.extend(("W", "X"))
+    return tuple(
+        (points[start], points[end])
+        for start, end in zip(point_sequence, point_sequence[1:])
+    )
+
+
 def validate_osc1_clearance(
     cfg: dict,
     points: dict[str, Point],
@@ -369,29 +467,81 @@ def validate_osc1_clearance(
         raise ValueError("OSC1 A via violates clearance to the top-layer VIN escape.")
 
 
+def validate_osc2_clearance(
+    cfg: dict,
+    osc1_points: dict[str, Point],
+    osc1_body_segments: tuple[Segment, ...],
+    osc1_escape_segments: tuple[Segment, ...],
+    osc2_points: dict[str, Point],
+    osc2_body_segments: tuple[Segment, ...],
+) -> None:
+    """Check OSC2 fanout against existing through-vias and shared VIN routing."""
+    if osc2_points["X"] != osc1_points["U"]:
+        raise ValueError("OSC2 must terminate at OSC1's shared VIN via U.")
+
+    minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    for osc1_pad in ("A", "V"):
+        if distance(osc2_points["A"], osc1_points[osc1_pad]) < minimum_pad_distance:
+            raise ValueError(f"OSC2 A via violates clearance to OSC1 {osc1_pad} via.")
+
+    minimum_trace_distance = osc1_via_trace_clearance(cfg)
+    for segment in osc2_body_segments:
+        if (
+            point_to_segment_distance(osc1_points["A"], segment) + GEOMETRY_TOLERANCE_MM
+            < minimum_trace_distance
+        ):
+            raise ValueError("OSC2 entry copper violates clearance to OSC1 A via.")
+        if (
+            point_to_segment_distance(osc1_points["V"], segment) + GEOMETRY_TOLERANCE_MM
+            < minimum_trace_distance
+        ):
+            raise ValueError("OSC2 copper violates clearance to OSC1 V via.")
+    for segment in osc1_body_segments + osc1_escape_segments:
+        if point_to_segment_distance(osc2_points["A"], segment) < minimum_trace_distance:
+            raise ValueError("OSC2 A via violates clearance to OSC1 copper.")
+
+
 def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
-    """Return point-driven OSC1 geometry; OSC2 is intentionally deferred."""
+    """Return point-driven primary geometry and the shared VIN escape."""
     cfg = build_config() if cfg is None else cfg
     dimensions = calculate_dimensions(cfg)
     validate_config(cfg, dimensions)
-    points = build_osc1_point_map(cfg, dimensions)
-    body_segments, escape_segments = build_osc1_segments(cfg, points)
-    validate_osc1_clearance(cfg, points, body_segments, escape_segments)
-    osc1_layer, _ = primary_layers(cfg)
+    osc1_points = build_osc1_point_map(cfg, dimensions)
+    osc1_body_segments, osc1_escape_segments = build_osc1_segments(cfg, osc1_points)
+    validate_osc1_clearance(cfg, osc1_points, osc1_body_segments, osc1_escape_segments)
+    osc1_layer, osc2_layer = primary_layers(cfg)
+    coils: list[PrimaryCoil] = [
+        PrimaryCoil(
+            "OSC1",
+            osc1_layer,
+            target_facing_layer(cfg),
+            osc1_points,
+            osc1_body_segments,
+            osc1_escape_segments,
+        )
+    ]
+    pads = {"OSC1_A": osc1_points["A"], "VIN_U": osc1_points["U"], "VIN_V": osc1_points["V"]}
+
+    if cfg["generate_osc2"]:
+        osc2_points = build_osc2_point_map(cfg, osc1_points)
+        osc2_body_segments = build_osc2_segments(cfg, osc2_points)
+        validate_osc2_clearance(
+            cfg,
+            osc1_points,
+            osc1_body_segments,
+            osc1_escape_segments,
+            osc2_points,
+            osc2_body_segments,
+        )
+        coils.append(
+            PrimaryCoil("OSC2", osc2_layer, osc2_layer, osc2_points, osc2_body_segments, ())
+        )
+        pads["OSC2_A"] = osc2_points["A"]
 
     return PrimaryGeometry(
         dimensions=dimensions,
-        pads={"A": points["A"], "U": points["U"], "V": points["V"]},
-        coils=(
-            PrimaryCoil(
-                "OSC1",
-                osc1_layer,
-                target_facing_layer(cfg),
-                points,
-                body_segments,
-                escape_segments,
-            ),
-        ),
+        pads=pads,
+        coils=tuple(coils),
     )
 
 
@@ -436,7 +586,7 @@ def render_footprint(cfg: dict | None = None) -> str:
         sections.append(
             pad_thru_hole(
                 cfg["osc1_output_pad_name"],
-                geometry.pads["A"],
+                geometry.pads["OSC1_A"],
                 cfg["via_diameter_mm"],
                 cfg["via_hole_size_mm"],
             )
@@ -446,7 +596,7 @@ def render_footprint(cfg: dict | None = None) -> str:
         sections.append(
             pad_thru_hole(
                 cfg["primary_input_pad_name"],
-                geometry.pads["U"],
+                geometry.pads["VIN_U"],
                 cfg["via_diameter_mm"],
                 cfg["via_hole_size_mm"],
             )
@@ -458,11 +608,24 @@ def render_footprint(cfg: dict | None = None) -> str:
         sections.append(
             pad_thru_hole(
                 cfg["primary_input_pad_name"],
-                geometry.pads["V"],
+                geometry.pads["VIN_V"],
                 cfg["via_diameter_mm"],
                 cfg["via_hole_size_mm"],
             )
         )
+
+    if cfg["generate_osc2"]:
+        coil = next(coil for coil in geometry.coils if coil.name == "OSC2")
+        sections.append(
+            pad_thru_hole(
+                cfg["osc2_output_pad_name"],
+                geometry.pads["OSC2_A"],
+                cfg["via_diameter_mm"],
+                cfg["via_hole_size_mm"],
+            )
+        )
+        for segment in coil.body_segments:
+            sections.append(fp_line(segment[0], segment[1], cfg["trace_width_mm"], coil.layer))
 
     sections.append(")\n")
     return "".join(sections)

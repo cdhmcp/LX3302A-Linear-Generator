@@ -4,18 +4,21 @@ import linear_sensor_generator as generator
 
 
 class LinearSensorGeneratorTests(unittest.TestCase):
-    def test_default_dimensions_and_osc1_layers(self) -> None:
+    def test_default_dimensions_and_primary_layers(self) -> None:
         geometry = generator.build_primary_geometry()
-        coil = geometry.coils[0]
+        osc1, osc2 = geometry.coils
 
         self.assertEqual(geometry.dimensions.secondary_period_mm, 42.0)
         self.assertEqual(geometry.dimensions.secondary_length_mm, 91.0)
         self.assertEqual(geometry.dimensions.secondary_width_mm, 5.5)
         self.assertEqual(geometry.dimensions.primary_length_mm, 97.0)
         self.assertEqual(geometry.dimensions.primary_width_mm, 11.5)
-        self.assertEqual(coil.name, "OSC1")
-        self.assertEqual(coil.layer, "B.Cu")
-        self.assertEqual(coil.escape_layer, "F.Cu")
+        self.assertEqual(osc1.name, "OSC1")
+        self.assertEqual(osc1.layer, "B.Cu")
+        self.assertEqual(osc1.escape_layer, "F.Cu")
+        self.assertEqual(osc2.name, "OSC2")
+        self.assertEqual(osc2.layer, "In2.Cu")
+        self.assertEqual(osc2.escape_segments, ())
 
     def test_default_osc1_uses_annotated_three_turn_path(self) -> None:
         coil = generator.build_primary_geometry().coils[0]
@@ -62,38 +65,44 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(points["U"][1], -1.2)
         self.assertEqual(points["V"][1], -1.2)
 
-    def test_default_footprint_emits_only_osc1_and_two_vin_vias(self) -> None:
+    def test_default_footprint_emits_osc1_osc2_and_two_vin_vias(self) -> None:
         footprint = generator.render_footprint()
 
         self.assertIn('(pad "OSC1" thru_hole', footprint)
         self.assertEqual(footprint.count('(pad "VIN" thru_hole'), 2)
-        self.assertNotIn('(pad "OSC2" thru_hole', footprint)
+        self.assertIn('(pad "OSC2" thru_hole', footprint)
         self.assertIn('(layer "B.Cu")', footprint)
         self.assertIn('(layer "F.Cu")', footprint)
-        self.assertNotIn('(layer "In2.Cu")', footprint)
+        self.assertIn('(layer "In2.Cu")', footprint)
 
-    def test_bottom_target_mirrors_osc1_and_escape_layers(self) -> None:
+    def test_bottom_target_mirrors_primary_and_escape_layers(self) -> None:
         cfg = generator.build_config({"target_side": "bottom"})
-        coil = generator.build_primary_geometry(cfg).coils[0]
+        osc1, osc2 = generator.build_primary_geometry(cfg).coils
 
-        self.assertEqual(coil.layer, "F.Cu")
-        self.assertEqual(coil.escape_layer, "B.Cu")
+        self.assertEqual(osc1.layer, "F.Cu")
+        self.assertEqual(osc1.escape_layer, "B.Cu")
+        self.assertEqual(osc2.layer, "In1.Cu")
 
     def test_right_fanout_mirrors_point_map_horizontally(self) -> None:
-        left_points = generator.build_primary_geometry().coils[0].points
+        left_geometry = generator.build_primary_geometry()
         cfg = generator.build_config({"fanout_side": "right"})
-        right_points = generator.build_primary_geometry(cfg).coils[0].points
+        right_geometry = generator.build_primary_geometry(cfg)
 
         for name in ("A", "B", "C", "D", "E", "F", "U", "V"):
-            self.assertAlmostEqual(right_points[name][0], -left_points[name][0])
-            self.assertAlmostEqual(right_points[name][1], left_points[name][1])
+            self.assertAlmostEqual(right_geometry.coils[0].points[name][0], -left_geometry.coils[0].points[name][0])
+            self.assertAlmostEqual(right_geometry.coils[0].points[name][1], left_geometry.coils[0].points[name][1])
+        for name in ("A", "B", "C", "D", "E", "F", "X"):
+            self.assertAlmostEqual(right_geometry.coils[1].points[name][0], -left_geometry.coils[1].points[name][0])
+            self.assertAlmostEqual(right_geometry.coils[1].points[name][1], left_geometry.coils[1].points[name][1])
 
     def test_configurable_fourth_turn_gets_generated_labels(self) -> None:
         cfg = generator.build_config({"number_of_primary_turns": 4})
-        coil = generator.build_primary_geometry(cfg).coils[0]
+        osc1, osc2 = generator.build_primary_geometry(cfg).coils
 
-        self.assertIn("TURN4_START", coil.points)
-        self.assertEqual(coil.body_segments[-1][1], coil.points["U"])
+        self.assertIn("TURN4_START", osc1.points)
+        self.assertIn("OSC2_TURN4_START", osc2.points)
+        self.assertEqual(osc1.body_segments[-1][1], osc1.points["U"])
+        self.assertEqual(osc2.body_segments[-1][1], osc2.points["X"])
 
     def test_u_via_clearance_is_derived_from_via_and_trace_properties(self) -> None:
         cfg = generator.build_config()
@@ -128,10 +137,33 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Primary width is insufficient"):
             generator.build_primary_geometry(cfg)
 
-    def test_osc2_remains_deferred(self) -> None:
-        cfg = generator.build_config({"generate_osc2": True})
+    def test_default_osc2_reverses_overlaid_perimeters_and_shares_vin_via(self) -> None:
+        osc1, osc2 = generator.build_primary_geometry().coils
+        points = osc2.points
 
-        with self.assertRaisesRegex(ValueError, "OSC2 generation is deferred"):
+        self.assertEqual(points["X"], osc1.points["U"])
+        self.assertEqual(points["G"], osc1.points["G"])
+        self.assertEqual(points["J"], osc1.points["D"])
+        self.assertEqual(points["M"], osc1.points["M"])
+        self.assertEqual(points["P"], osc1.points["J"])
+        self.assertEqual(points["S"], osc1.points["S"])
+        self.assertEqual(points["V"], osc1.points["P"])
+        self.assertIn((osc1.points["G"], osc1.points["F"]), osc2.body_segments)
+        self.assertIn((osc1.points["F"], osc1.points["E"]), osc2.body_segments)
+        self.assertIn((osc1.points["M"], osc1.points["L"]), osc2.body_segments)
+        self.assertIn((osc1.points["S"], osc1.points["R"]), osc2.body_segments)
+        self.assertEqual(osc2.body_segments[-1], (points["W"], points["X"]))
+
+    def test_osc2_can_be_disabled_independently(self) -> None:
+        cfg = generator.build_config({"generate_osc2": False})
+
+        self.assertEqual([coil.name for coil in generator.build_primary_geometry(cfg).coils], ["OSC1"])
+        self.assertNotIn('(pad "OSC2" thru_hole', generator.render_footprint(cfg))
+
+    def test_osc2_requires_osc1_shared_vin_transition(self) -> None:
+        cfg = generator.build_config({"generate_osc1": False, "generate_osc2": True})
+
+        with self.assertRaisesRegex(ValueError, "OSC2 requires OSC1"):
             generator.build_primary_geometry(cfg)
 
 
