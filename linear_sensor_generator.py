@@ -29,8 +29,8 @@ MAIN_PROPERTIES = {
     "target_x_mm": 21.0,
     "target_y_mm": 7.0,
     "measurement_range_mm": 50.0,
-    "limit_before_mm": 10.0,
-    "limit_after_mm": 10.0,
+    "limit_before_mm": 0.5,
+    "limit_after_mm": 0.5,
     "secondary_period_multiplier": 2.0,
     "secondary_y_reduction_mm": 1.5,
 
