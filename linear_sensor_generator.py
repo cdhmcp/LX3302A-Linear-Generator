@@ -223,6 +223,32 @@ def trace_pitch(cfg: dict) -> float:
     return cfg["trace_width_mm"] + cfg["trace_spacing_mm"]
 
 
+def terminal_pad_pitch(cfg: dict) -> float:
+    """Return center spacing for adjacent external through-via pads."""
+    return cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+
+
+def terminal_column_x(cfg: dict, dimensions: SensorDimensions) -> float:
+    """Return the common fanout column for all external terminal vias."""
+    return fanout_direction(cfg) * (
+        (dimensions.primary_length_mm / 2.0) + cfg["terminal_escape_length_mm"]
+    )
+
+
+def terminal_row_y(cfg: dict, pad_name: str) -> float:
+    """Return a compact terminal row with CL1 between VIN and OSC1."""
+    row_index = {
+        "CL1-GND": -4,
+        "CL2-GND": -3,
+        "VIN": -2,
+        "CL1": -1,
+        "OSC1": 0,
+        "OSC2": 1,
+        "CL2": 2,
+    }[pad_name]
+    return row_index * terminal_pad_pitch(cfg)
+
+
 def parallel_45_center_shift(cfg: dict) -> float:
     """Offset parallel 45 degree transitions so their perpendicular pitch is legal."""
     return trace_pitch(cfg) * (math.sqrt(2.0) - 1.0)
@@ -395,9 +421,9 @@ def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, P
     outer_near_x = side * half_length
     transition_half_height = pitch / 2.0
     entry_x = outer_near_x + (side * transition_half_height)
-    terminal_x = outer_near_x + (side * cfg["terminal_escape_length_mm"])
+    terminal_x = terminal_column_x(cfg, dimensions)
     points: dict[str, Point] = {
-        "A": (terminal_x, 0.0),
+        "A": (terminal_x, terminal_row_y(cfg, "OSC1")),
         "B": (entry_x, 0.0),
     }
 
@@ -426,15 +452,11 @@ def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, P
     points[last_end] = (inner_near_x, via_y - via_transition)
     via_x = inner_near_x - (side * via_transition)
     points["U"] = (via_x, via_y)
-    minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    terminal_separation_y = abs(via_y - points["A"][1])
-    additional_fanout = 0.0
-    if terminal_separation_y < minimum_pad_distance:
-        additional_fanout = math.sqrt(
-            (minimum_pad_distance * minimum_pad_distance)
-            - (terminal_separation_y * terminal_separation_y)
-        )
-    points["V"] = (terminal_x + (side * additional_fanout), via_y)
+    points["VIN_JOG"] = (
+        terminal_x - (side * abs(terminal_row_y(cfg, "VIN") - via_y)),
+        via_y,
+    )
+    points["V"] = (terminal_x, terminal_row_y(cfg, "VIN"))
     return points
 
 
@@ -451,7 +473,11 @@ def build_osc1_segments(
         (points[start], points[end])
         for start, end in zip(point_sequence, point_sequence[1:])
     )
-    return body, ((points["U"], points["V"]),)
+    escape_segments = (
+        (points["U"], points["VIN_JOG"]),
+        (points["VIN_JOG"], points["V"]),
+    )
+    return body, escape_segments
 
 
 def osc2_turn_labels(turn_index: int) -> tuple[str, str, str, str]:
@@ -493,14 +519,17 @@ def build_osc2_point_map(
     pitch = trace_pitch(cfg)
     junction_separation = parallel_45_junction_separation(cfg)
     via_clearance = osc1_via_trace_clearance(cfg)
-    pad_clearance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    pad_clearance = terminal_pad_pitch(cfg)
     turn_count = cfg["number_of_primary_turns"]
     outer_x = osc1_points[osc1_turn_labels(0)[1]][0]
 
-    # Join the midpoint entry after clearing OSC1's through-via at A.
-    b_x = osc1_points["A"][0] - (side * via_clearance * math.sqrt(2.0))
+    # Leave the terminal column horizontally, then use one 45 degree jog into
+    # the midpoint entry after clearing the adjacent OSC1 terminal via.
+    a_jog_x = osc1_points["A"][0] - (side * via_clearance)
+    b_x = a_jog_x - (side * pad_clearance)
     points: dict[str, Point] = {
-        "A": (b_x + (side * pad_clearance), pad_clearance),
+        "A": (osc1_points["A"][0], terminal_row_y(cfg, "OSC2")),
+        "A_JOG": (a_jog_x, terminal_row_y(cfg, "OSC2")),
         "B": (b_x, 0.0),
         "C": (outer_x + (side * 2.0 * pitch), 0.0),
         "X": osc1_points["U"],
@@ -539,7 +568,7 @@ def build_osc2_point_map(
 
 def build_osc2_segments(cfg: dict, points: dict[str, Point]) -> tuple[Segment, ...]:
     """Return OSC2 path in alphabetical point-map order, with hidden far corners."""
-    point_sequence = ["A", "B", "C", "D", "E", "F"]
+    point_sequence = ["A", "A_JOG", "B", "C", "D", "E", "F"]
     for turn in range(cfg["number_of_primary_turns"]):
         point_sequence.extend(osc2_turn_labels(turn))
         if turn < cfg["number_of_primary_turns"] - 1:
@@ -561,7 +590,7 @@ def validate_osc1_clearance(
     minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
     if cfg["osc1_vin_exit_offset_mm"] < osc1_via_trace_clearance(cfg):
         raise ValueError(
-            "osc1_vin_exit_offset_mm is too small for horizontal A-B and U-V "
+            "osc1_vin_exit_offset_mm is too small for OSC1/VIN "
             "via-to-trace clearance."
         )
     for start, end in (("A", "V"), ("A", "U"), ("U", "V")):
@@ -580,8 +609,9 @@ def validate_osc1_clearance(
                 continue
             if point_to_segment_distance(points[pad_name], segment) < minimum_trace_distance:
                 raise ValueError(f"OSC1 {pad_name} via violates clearance to winding copper.")
-    if point_to_segment_distance(points["A"], escape_segments[0]) < minimum_trace_distance:
-        raise ValueError("OSC1 A via violates clearance to the top-layer VIN escape.")
+    for segment in escape_segments:
+        if point_to_segment_distance(points["A"], segment) < minimum_trace_distance:
+            raise ValueError("OSC1 A via violates clearance to the top-layer VIN escape.")
 
 
 def validate_osc2_clearance(
@@ -827,8 +857,9 @@ def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     lower_via_y = inner_primary_y - primary_via_clearance
     runup = cfg["secondary_jump_runup_via_multiplier"] * cfg["via_diameter_mm"]
     detour = cfg["secondary_jump_detour_via_multiplier"] * cfg["via_diameter_mm"]
-    terminal_x = -(dimensions.primary_length_mm / 2.0) - cfg["terminal_escape_length_mm"]
-    terminal_fanout = 3.0 * via_pair_spacing
+    terminal_x = -((dimensions.primary_length_mm / 2.0) + cfg["terminal_escape_length_mm"])
+    terminal_output_y = terminal_row_y(cfg, "CL2")
+    terminal_return_y = terminal_row_y(cfg, "CL2-GND")
     _, midpoint_slope = secondary_wave_value_and_slope(cfg, dimensions, -half_span, -1.0)
     midpoint_horizontal_spacing = (
         pitch * math.hypot(midpoint_slope, 1.0) / abs(midpoint_slope)
@@ -836,8 +867,8 @@ def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
 
     points: dict[str, Point] = {
         # Provisional IC-side fanout, kept outside the primary boundary.
-        "A": (terminal_x, terminal_fanout),
-        "B": (terminal_x + terminal_fanout, 0.0),
+        "A": (terminal_x, terminal_output_y),
+        "B": (terminal_x - (fanout_direction(cfg) * terminal_output_y), 0.0),
         "C": (-half_span, 0.0),
         # First forward pass.
         "D": (-quarter_span + (via_pair_spacing / 2.0), -amplitude),
@@ -871,8 +902,8 @@ def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         "ZL": (-quarter_span + (via_pair_spacing / 2.0), lower_via_y),
         "ZM": (-quarter_span + (via_pair_spacing / 2.0), amplitude),
         "ZN": (-half_span, 0.0),
-        "ZO": (terminal_x + terminal_fanout, 0.0),
-        "ZP": (terminal_x, -terminal_fanout),
+        "ZO": (terminal_x - (fanout_direction(cfg) * abs(terminal_return_y)), 0.0),
+        "ZP": (terminal_x, terminal_return_y),
     }
 
     points["K"] = secondary_rail_point(
@@ -1119,12 +1150,15 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         (via_clearance * via_clearance) - (end_column_delta * end_column_delta)
     )
 
-    # C occupies the lane between the OSC1 VIN escape and CL2 entrance.
-    entrance_y = -cfg["osc1_vin_exit_offset_mm"] / 2.0
-    terminal_x = -(dimensions.primary_length_mm / 2.0) - cfg["terminal_escape_length_mm"]
-    terminal_y = 3.0
-    entry_b_x = terminal_x + abs(terminal_y - entrance_y)
-    return_zm_x = terminal_x + abs(-terminal_y - entrance_y)
+    # CL1 is the straight-through row between the VIN and OSC1 terminals.
+    entrance_y = terminal_row_y(cfg, "CL1")
+    terminal_x = -((dimensions.primary_length_mm / 2.0) + cfg["terminal_escape_length_mm"])
+    terminal_y = terminal_row_y(cfg, "CL1")
+    return_terminal_y = terminal_row_y(cfg, "CL1-GND")
+    entry_b_x = terminal_x - (fanout_direction(cfg) * cfg["terminal_escape_length_mm"])
+    return_zm_x = terminal_x - (
+        fanout_direction(cfg) * abs(return_terminal_y - entrance_y)
+    )
 
     # K-L and ZC-ZD are compact semicircles centered on this column. Their
     # radius leaves one trace pitch to CL2 J/ZG at the adjacent end column.
@@ -1171,7 +1205,7 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         "ZK": (left_x, entrance_y - via_clearance),
         "ZL": (left_x - via_clearance, entrance_y),
         "ZM": (return_zm_x, entrance_y),
-        "ZN": (terminal_x, -terminal_y),
+        "ZN": (terminal_x, return_terminal_y),
     }
     if fanout_direction(cfg) > 0:
         points = {label: (-point[0], point[1]) for label, point in points.items()}

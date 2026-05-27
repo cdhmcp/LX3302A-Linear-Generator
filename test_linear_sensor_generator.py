@@ -34,8 +34,15 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertIn((points["H"], points["I"]), coil.body_segments)
         self.assertIn((points["N"], points["O"]), coil.body_segments)
         self.assertEqual(coil.body_segments[-1], (points["T"], points["U"]))
-        self.assertEqual(coil.escape_segments, ((points["U"], points["V"]),))
-        self.assertEqual(points["U"][1], points["V"][1])
+        self.assertEqual(
+            coil.escape_segments,
+            ((points["U"], points["VIN_JOG"]), (points["VIN_JOG"], points["V"])),
+        )
+        self.assertEqual(points["U"][1], points["VIN_JOG"][1])
+        self.assertAlmostEqual(
+            abs(points["V"][0] - points["VIN_JOG"][0]),
+            abs(points["V"][1] - points["VIN_JOG"][1]),
+        )
         self.assertAlmostEqual(abs(points["C"][0] - points["B"][0]), pitch / 2.0)
         self.assertAlmostEqual(abs(points["C"][1] - points["B"][1]), pitch / 2.0)
         self.assertAlmostEqual(abs(points["I"][0] - points["H"][0]), pitch)
@@ -63,7 +70,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(points["V"][0], expected_terminal_x)
         self.assertEqual(points["A"][1], 0.0)
         self.assertEqual(points["U"][1], -1.2)
-        self.assertEqual(points["V"][1], -1.2)
+        self.assertEqual(points["VIN_JOG"][1], points["U"][1])
+        self.assertEqual(points["V"][1], generator.terminal_row_y(cfg, "VIN"))
 
     def test_default_footprint_emits_oscillators_receivers_and_two_vin_vias(self) -> None:
         footprint = generator.render_footprint()
@@ -81,6 +89,32 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(footprint.count("(fp_arc "), 5)
         self.assertIn('(layer "In1.Cu")', footprint)
 
+    def test_external_terminal_vias_share_compact_column_and_cl1_is_straight(self) -> None:
+        cfg = generator.build_config()
+        primary = generator.build_primary_geometry(cfg)
+        cl2 = generator.build_cl2_geometry(cfg, primary)
+        cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+        assert cl1 is not None and cl2 is not None
+        terminals = (
+            ("CL1-GND", cl1.points["ZN"]),
+            ("CL2-GND", cl2.points["ZP"]),
+            ("VIN", primary.pads["VIN_V"]),
+            ("CL1", cl1.points["A"]),
+            ("OSC1", primary.pads["OSC1_A"]),
+            ("OSC2", primary.pads["OSC2_A"]),
+            ("CL2", cl2.points["A"]),
+        )
+        expected_x = generator.terminal_column_x(cfg, primary.dimensions)
+        expected_spacing = generator.terminal_pad_pitch(cfg)
+
+        for name, point in terminals:
+            self.assertAlmostEqual(point[0], expected_x)
+            self.assertAlmostEqual(point[1], generator.terminal_row_y(cfg, name))
+        for (_, first), (_, second) in zip(terminals, terminals[1:]):
+            self.assertAlmostEqual(generator.distance(first, second), expected_spacing)
+        self.assertEqual(cl1.points["A"][1], cl1.points["B"][1])
+        self.assertEqual(cl1.points["B"][1], cl1.points["C"][1])
+
     def test_bottom_target_mirrors_primary_and_escape_layers(self) -> None:
         cfg = generator.build_config({"target_side": "bottom"})
         osc1, osc2 = generator.build_primary_geometry(cfg).coils
@@ -94,10 +128,10 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         cfg = generator.build_config({"fanout_side": "right"})
         right_geometry = generator.build_primary_geometry(cfg)
 
-        for name in ("A", "B", "C", "D", "E", "F", "U", "V"):
+        for name in ("A", "B", "C", "D", "E", "F", "U", "VIN_JOG", "V"):
             self.assertAlmostEqual(right_geometry.coils[0].points[name][0], -left_geometry.coils[0].points[name][0])
             self.assertAlmostEqual(right_geometry.coils[0].points[name][1], left_geometry.coils[0].points[name][1])
-        for name in ("A", "B", "C", "D", "E", "F", "X"):
+        for name in ("A", "A_JOG", "B", "C", "D", "E", "F", "X"):
             self.assertAlmostEqual(right_geometry.coils[1].points[name][0], -left_geometry.coils[1].points[name][0])
             self.assertAlmostEqual(right_geometry.coils[1].points[name][1], left_geometry.coils[1].points[name][1])
 
@@ -118,17 +152,23 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertAlmostEqual(points["U"][0] - points["T"][0], expected_clearance)
         self.assertAlmostEqual(abs(points["U"][1] - points["T"][1]), expected_clearance)
 
-    def test_tiny_exit_offset_fans_out_via_without_moving_lane_y(self) -> None:
+    def test_exit_offset_moves_internal_via_without_moving_terminal_row(self) -> None:
         cfg = generator.build_config({"osc1_vin_exit_offset_mm": 0.55})
         points = generator.build_primary_geometry(cfg).coils[0].points
 
-        self.assertEqual(points["V"][1], -0.55)
-        self.assertLess(points["V"][0], points["A"][0])
+        self.assertEqual(points["U"][1], -0.55)
+        self.assertEqual(points["VIN_JOG"][1], points["U"][1])
+        self.assertAlmostEqual(
+            abs(points["V"][0] - points["VIN_JOG"][0]),
+            abs(points["V"][1] - points["VIN_JOG"][1]),
+        )
+        self.assertEqual(points["V"][1], generator.terminal_row_y(cfg, "VIN"))
+        self.assertEqual(points["V"][0], points["A"][0])
 
     def test_exit_offset_below_horizontal_trace_clearance_is_rejected(self) -> None:
         cfg = generator.build_config({"osc1_vin_exit_offset_mm": 0.1})
 
-        with self.assertRaisesRegex(ValueError, "too small for horizontal"):
+        with self.assertRaisesRegex(ValueError, "too small for OSC1/VIN"):
             generator.build_primary_geometry(cfg)
 
     def test_invalid_secondary_width_is_rejected(self) -> None:
@@ -154,6 +194,11 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(points["P"], osc1.points["J"])
         self.assertEqual(points["S"], osc1.points["S"])
         self.assertEqual(points["V"], osc1.points["P"])
+        self.assertEqual(points["A"][1], points["A_JOG"][1])
+        self.assertAlmostEqual(
+            abs(points["B"][0] - points["A_JOG"][0]),
+            abs(points["B"][1] - points["A_JOG"][1]),
+        )
         self.assertIn((osc1.points["G"], osc1.points["F"]), osc2.body_segments)
         self.assertIn((osc1.points["F"], osc1.points["E"]), osc2.body_segments)
         self.assertIn((osc1.points["M"], osc1.points["L"]), osc2.body_segments)
