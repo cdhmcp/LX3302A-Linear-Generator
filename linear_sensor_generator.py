@@ -41,7 +41,7 @@ MAIN_PROPERTIES = {
 
     # Placement and output
     "target_side": "top",
-    "fanout_side": "left",
+    "fanout_side": "right",
     "output_dir": "InductiveSensors.pretty",
     "footprint_name": "LX3302A_LINEAR_SENSOR_COILS",
     "reference_text": "REF**",
@@ -908,7 +908,7 @@ def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     points: dict[str, Point] = {
         # Provisional IC-side fanout, kept outside the primary boundary.
         "A": (terminal_x, terminal_output_y),
-        "B": (terminal_x - (fanout_direction(cfg) * terminal_output_y), 0.0),
+        "B": (terminal_x + abs(terminal_output_y), 0.0),
         "C": (-half_span, 0.0),
         # First forward pass.
         "D": (-quarter_span + (via_pair_spacing / 2.0), -amplitude),
@@ -942,7 +942,7 @@ def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         "ZL": (-quarter_span + (via_pair_spacing / 2.0), lower_via_y),
         "ZM": (-quarter_span + (via_pair_spacing / 2.0), amplitude),
         "ZN": (-half_span, 0.0),
-        "ZO": (terminal_x - (fanout_direction(cfg) * abs(terminal_return_y)), 0.0),
+        "ZO": (terminal_x + abs(terminal_return_y), 0.0),
         "ZP": (terminal_x, terminal_return_y),
     }
 
@@ -1200,10 +1200,8 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     terminal_x = -((dimensions.primary_length_mm / 2.0) + cfg["terminal_escape_length_mm"])
     terminal_y = terminal_row_y(cfg, "CL1")
     return_terminal_y = terminal_row_y(cfg, "CL1-GND")
-    entry_b_x = terminal_x - (fanout_direction(cfg) * cfg["terminal_escape_length_mm"])
-    return_zm_x = terminal_x - (
-        fanout_direction(cfg) * abs(return_terminal_y - entrance_y)
-    )
+    entry_b_x = terminal_x + cfg["terminal_escape_length_mm"]
+    return_zm_x = terminal_x + abs(return_terminal_y - entrance_y)
 
     # K-L and ZC-ZD are compact semicircles centered on this column. Their
     # radius leaves one trace pitch to CL2 J/ZG at the adjacent end column.

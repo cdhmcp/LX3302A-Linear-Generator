@@ -23,11 +23,12 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(osc2.escape_segments, ())
 
     def test_default_osc1_uses_annotated_three_turn_path(self) -> None:
-        coil = generator.build_primary_geometry().coils[0]
+        cfg = generator.build_config({"fanout_side": "left"})
+        coil = generator.build_primary_geometry(cfg).coils[0]
         points = coil.points
-        pitch = generator.trace_pitch(generator.build_config())
+        pitch = generator.trace_pitch(cfg)
         transition_shift = pitch * (math.sqrt(2.0) - 1.0)
-        junction_separation = generator.parallel_45_junction_separation(generator.build_config())
+        junction_separation = generator.parallel_45_junction_separation(cfg)
 
         self.assertEqual(coil.body_segments[0], (points["A"], points["B"]))
         self.assertEqual(points["A"][1], points["B"][1])
@@ -63,7 +64,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         )
 
     def test_default_escape_coordinates_use_requested_terminal_boundary(self) -> None:
-        cfg = generator.build_config()
+        cfg = generator.build_config({"fanout_side": "left"})
         points = generator.build_primary_geometry(cfg).coils[0].points
         dimensions = generator.calculate_dimensions(cfg)
         expected_terminal_x = -(dimensions.primary_length_mm / 2.0) - cfg["terminal_escape_length_mm"]
@@ -137,7 +138,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(osc2.layer, "In1.Cu")
 
     def test_right_fanout_mirrors_point_map_horizontally(self) -> None:
-        left_geometry = generator.build_primary_geometry()
+        left_geometry = generator.build_primary_geometry(generator.build_config({"fanout_side": "left"}))
         cfg = generator.build_config({"fanout_side": "right"})
         right_geometry = generator.build_primary_geometry(cfg)
 
@@ -147,6 +148,44 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         for name in ("A", "A_JOG", "B", "C", "D", "E", "F", "X"):
             self.assertAlmostEqual(right_geometry.coils[1].points[name][0], -left_geometry.coils[1].points[name][0])
             self.assertAlmostEqual(right_geometry.coils[1].points[name][1], left_geometry.coils[1].points[name][1])
+
+    def test_right_fanout_receiver_terminal_stubs_route_toward_sensor(self) -> None:
+        cfg = generator.build_config({"fanout_side": "right"})
+        primary = generator.build_primary_geometry(cfg)
+        cl2 = generator.build_cl2_geometry(cfg, primary)
+        cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+        assert cl1 is not None and cl2 is not None
+
+        sensor_edge_x = generator.secondary_stroke_length(cfg) / 2.0
+        terminal_x = generator.terminal_column_x(cfg, primary.dimensions)
+
+        self.assertEqual(cl1.points["A"][0], terminal_x)
+        self.assertLess(cl1.points["B"][0], cl1.points["A"][0])
+        self.assertGreater(cl1.points["B"][0], cl1.points["C"][0])
+        self.assertGreater(cl1.points["C"][0], 0.0)
+        self.assertEqual(cl1.points["A"][1], cl1.points["B"][1])
+        self.assertEqual(cl1.points["B"][1], cl1.points["C"][1])
+        self.assertEqual(cl1.points["ZN"][0], terminal_x)
+        self.assertLess(cl1.points["ZM"][0], cl1.points["ZN"][0])
+        self.assertAlmostEqual(
+            abs(cl1.points["ZN"][0] - cl1.points["ZM"][0]),
+            abs(cl1.points["ZN"][1] - cl1.points["ZM"][1]),
+        )
+
+        self.assertEqual(cl2.points["A"][0], terminal_x)
+        self.assertLess(cl2.points["B"][0], cl2.points["A"][0])
+        self.assertGreater(cl2.points["B"][0], sensor_edge_x)
+        self.assertAlmostEqual(
+            abs(cl2.points["A"][0] - cl2.points["B"][0]),
+            abs(cl2.points["A"][1] - cl2.points["B"][1]),
+        )
+        self.assertEqual(cl2.points["ZP"][0], terminal_x)
+        self.assertLess(cl2.points["ZO"][0], cl2.points["ZP"][0])
+        self.assertGreater(cl2.points["ZO"][0], sensor_edge_x)
+        self.assertAlmostEqual(
+            abs(cl2.points["ZP"][0] - cl2.points["ZO"][0]),
+            abs(cl2.points["ZP"][1] - cl2.points["ZO"][1]),
+        )
 
     def test_configurable_fourth_turn_gets_generated_labels(self) -> None:
         cfg = generator.build_config({"number_of_primary_turns": 4})
@@ -158,7 +197,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(osc2.body_segments[-1][1], osc2.points["X"])
 
     def test_u_via_clearance_is_derived_from_via_and_trace_properties(self) -> None:
-        cfg = generator.build_config()
+        cfg = generator.build_config({"fanout_side": "left"})
         points = generator.build_primary_geometry(cfg).coils[0].points
         expected_clearance = generator.osc1_via_trace_clearance(cfg)
 
@@ -232,7 +271,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             generator.build_primary_geometry(cfg)
 
     def test_reference_cl2_span_layers_and_outer_extrema(self) -> None:
-        cfg = generator.build_config({"target_y_mm": 7.0})
+        cfg = generator.build_config({"target_y_mm": 7.0, "fanout_side": "left"})
         cl2 = generator.build_cl2_geometry(cfg)
         self.assertIsNotNone(cl2)
         assert cl2 is not None
@@ -262,9 +301,9 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             generator.render_footprint(cfg)
 
     def test_cl2_corrected_u_layer_jump_and_continuity_anchors(self) -> None:
-        cfg = generator.build_config()
+        cfg = generator.build_config({"fanout_side": "left"})
         dimensions = generator.calculate_dimensions(cfg)
-        cl2 = generator.build_cl2_geometry()
+        cl2 = generator.build_cl2_geometry(cfg)
         assert cl2 is not None
         points = cl2.points
         half_pitch = generator.trace_pitch(cfg) / 2.0
@@ -394,7 +433,9 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             )
 
     def test_cl2_bottom_layers_and_right_fanout_are_mirrored(self) -> None:
-        left = generator.build_cl2_geometry()
+        left = generator.build_cl2_geometry(
+            generator.build_config({"target_side": "bottom", "fanout_side": "left"})
+        )
         right = generator.build_cl2_geometry(
             generator.build_config({"target_side": "bottom", "fanout_side": "right"})
         )
@@ -402,7 +443,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
 
         self.assertEqual(right.target_layer, "B.Cu")
         self.assertEqual(right.inner_layer, "In2.Cu")
-        for name in ("A", "C", "D", "J", "U", "ZP"):
+        for name in ("A", "B", "C", "D", "J", "U", "ZN", "ZO", "ZP"):
             self.assertAlmostEqual(right.points[name][0], -left.points[name][0])
             self.assertAlmostEqual(right.points[name][1], left.points[name][1])
 
@@ -452,7 +493,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertIn((cl1.points["ZM"], cl1.points["ZN"]), cl1.inner_segments)
 
     def test_cl1_mn_and_zazb_arcs_preserve_columns_around_cl1_vias(self) -> None:
-        cfg = generator.build_config()
+        cfg = generator.build_config({"fanout_side": "left"})
         cl1 = generator.build_cl1_geometry(cfg)
         assert cl1 is not None
         expected_radius = generator.osc1_via_trace_clearance(cfg)
@@ -472,7 +513,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertAlmostEqual(cl1.points["ZB"][0], expected_inner_x)
 
     def test_cl1_zk_zl_arc_is_concentric_with_c_via(self) -> None:
-        cfg = generator.build_config()
+        cfg = generator.build_config({"fanout_side": "left"})
         cl1 = generator.build_cl1_geometry(cfg)
         assert cl1 is not None
         center = cl1.points["C"]
@@ -487,7 +528,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertLess(arc[1][1], center[1])
 
     def test_cl1_kl_and_zczd_arcs_are_centered_on_column_with_cl2_clearance(self) -> None:
-        cfg = generator.build_config()
+        cfg = generator.build_config({"fanout_side": "left"})
         cl2 = generator.build_cl2_geometry(cfg)
         cl1 = generator.build_cl1_geometry(cfg)
         assert cl1 is not None and cl2 is not None
@@ -548,7 +589,9 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             )
 
     def test_cl1_bottom_layers_and_right_fanout_are_mirrored(self) -> None:
-        left = generator.build_cl1_geometry()
+        left = generator.build_cl1_geometry(
+            generator.build_config({"target_side": "bottom", "fanout_side": "left"})
+        )
         right = generator.build_cl1_geometry(
             generator.build_config({"target_side": "bottom", "fanout_side": "right"})
         )
@@ -557,7 +600,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(right.target_layer, "B.Cu")
         self.assertEqual(right.inner_layer, "In2.Cu")
         self.assertEqual(right.crossover_layer, "In1.Cu")
-        for name in ("A", "C", "D", "J", "T", "U", "ZN"):
+        for name in ("A", "B", "C", "D", "J", "T", "U", "ZM", "ZN"):
             self.assertAlmostEqual(right.points[name][0], -left.points[name][0])
             self.assertAlmostEqual(right.points[name][1], left.points[name][1])
 
