@@ -5,8 +5,9 @@ import linear_sensor_generator as generator
 
 
 class LinearSensorGeneratorTests(unittest.TestCase):
-    def test_default_dimensions_and_primary_layers(self) -> None:
-        geometry = generator.build_primary_geometry()
+    def test_reference_dimensions_and_primary_layers(self) -> None:
+        cfg = generator.build_config({"target_y_mm": 7.0})
+        geometry = generator.build_primary_geometry(cfg)
         osc1, osc2 = geometry.coils
 
         self.assertEqual(geometry.dimensions.secondary_period_mm, 42.0)
@@ -184,7 +185,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             generator.build_primary_geometry(cfg)
 
     def test_invalid_secondary_width_is_rejected(self) -> None:
-        cfg = generator.build_config({"secondary_y_reduction_mm": 7.0})
+        cfg = generator.build_config()
+        cfg["secondary_y_reduction_mm"] = cfg["target_y_mm"]
 
         with self.assertRaisesRegex(ValueError, "positive secondary width"):
             generator.build_primary_geometry(cfg)
@@ -229,8 +231,9 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "OSC2 requires OSC1"):
             generator.build_primary_geometry(cfg)
 
-    def test_default_cl2_span_layers_and_outer_extrema(self) -> None:
-        cl2 = generator.build_cl2_geometry()
+    def test_reference_cl2_span_layers_and_outer_extrema(self) -> None:
+        cfg = generator.build_config({"target_y_mm": 7.0})
+        cl2 = generator.build_cl2_geometry(cfg)
         self.assertIsNotNone(cl2)
         assert cl2 is not None
 
@@ -242,6 +245,21 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(cl2.points["ZN"], cl2.points["C"])
         self.assertEqual(cl2.points["D"][1], -2.75)
         self.assertEqual(cl2.points["G"][1], 2.75)
+
+    def test_adjusted_target_height_generates_receiver_geometry(self) -> None:
+        for target_y_mm in (7.5, 9.0):
+            with self.subTest(target_y_mm=target_y_mm):
+                cfg = generator.build_config({"target_y_mm": target_y_mm})
+                footprint = generator.render_footprint(cfg)
+
+                self.assertIn('(pad "CL1" thru_hole', footprint)
+                self.assertIn('(pad "CL2" thru_hole', footprint)
+
+    def test_excessive_target_height_reports_receiver_spacing_failure(self) -> None:
+        cfg = generator.build_config({"target_y_mm": 10.0})
+
+        with self.assertRaisesRegex(ValueError, "CL1 parallel sinusoidal traces"):
+            generator.render_footprint(cfg)
 
     def test_cl2_corrected_u_layer_jump_and_continuity_anchors(self) -> None:
         cfg = generator.build_config()

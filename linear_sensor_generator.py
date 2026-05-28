@@ -27,7 +27,7 @@ Arc = tuple[Point, Point, Point]
 MAIN_PROPERTIES = {
     # Moving target and measurement-region inputs
     "target_x_mm": 21.0,
-    "target_y_mm": 7.0,
+    "target_y_mm": 9.0,
     "measurement_range_mm": 50.0,
     "limit_before_mm": 0.5,
     "limit_after_mm": 0.5,
@@ -73,7 +73,7 @@ FINE_TUNING_PROPERTIES = {
     "via_diameter_mm": 20 * MIL_TO_MM,
     "terminal_escape_length_mm": 5.0,
     "osc1_vin_exit_offset_mm": 1.2,
-    "secondary_curve_samples_per_cycle": 128,
+    "secondary_curve_samples_per_cycle": 512,
     "secondary_jump_runup_via_multiplier": 3.0,
     "secondary_jump_detour_via_multiplier": 0.35,
     # Recommended CL1 transition-column range: 0.02 to 0.05.
@@ -1131,8 +1131,13 @@ def validate_cl2_clearance(
         ),
     )
     for first, second in parallel_paths:
-        if path_to_path_distance(first, second) + polygonal_tolerance < pitch:
-            raise ValueError("CL2 parallel sinusoidal traces violate configured spacing.")
+        actual_spacing = path_to_path_distance(first, second)
+        if actual_spacing + polygonal_tolerance < pitch:
+            raise ValueError(
+                "CL2 parallel sinusoidal traces violate configured spacing: "
+                f"minimum centerline distance is {actual_spacing:.6f} mm, "
+                f"required pitch is {pitch:.6f} mm."
+            )
 
 
 def build_cl2_geometry(
@@ -1484,12 +1489,14 @@ def validate_cl1_clearance(
             phase_offset_radians=phase_offset,
             mirror_phase_sign=False,
         )
-        if (
-            path_to_path_distance(first_curve, second_curve)
-            + polygonal_transition_tolerance
-            < trace_pitch(cfg)
-        ):
-            raise ValueError("CL1 parallel sinusoidal traces violate configured spacing.")
+        actual_spacing = path_to_path_distance(first_curve, second_curve)
+        required_pitch = trace_pitch(cfg)
+        if actual_spacing + polygonal_transition_tolerance < required_pitch:
+            raise ValueError(
+                "CL1 parallel sinusoidal traces violate configured spacing: "
+                f"minimum centerline distance is {actual_spacing:.6f} mm, "
+                f"required pitch is {required_pitch:.6f} mm."
+            )
 
 
 def build_cl1_geometry(
