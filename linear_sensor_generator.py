@@ -26,9 +26,9 @@ Arc = tuple[Point, Point, Point]
 # Start here for normal sensor-size and placement changes.
 MAIN_PROPERTIES = {
     # Moving target and measurement-region inputs
-    "target_x_mm": 21.0,
-    "target_y_mm": 9.0,
-    "measurement_range_mm": 50.0,
+    "target_x_mm": 7.0,
+    "target_y_mm": 11.0,
+    "measurement_range_mm": 30.0, #stroke range clamp assumed
     "limit_before_mm": 0.5,
     "limit_after_mm": 0.5,
     "secondary_period_multiplier": 2.0,
@@ -37,7 +37,7 @@ MAIN_PROPERTIES = {
     # Primary oscillator sizing
     "primary_end_extension_mm": 3.0,
     "primary_y_margin_mm": 0.075,
-    "number_of_primary_turns": 3,
+    "number_of_primary_turns": 5,
 
     # Placement and output
     "target_side": "top",
