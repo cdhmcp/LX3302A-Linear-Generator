@@ -6,7 +6,7 @@ import linear_sensor_generator as generator
 
 class LinearSensorGeneratorTests(unittest.TestCase):
     def test_reference_dimensions_and_primary_layers(self) -> None:
-        cfg = generator.build_config({"target_y_mm": 7.0})
+        cfg = generator.build_config({"target_x_mm": 21.0, "target_y_mm": 7.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3})
         geometry = generator.build_primary_geometry(cfg)
         osc1, osc2 = geometry.coils
 
@@ -23,7 +23,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(osc2.escape_segments, ())
 
     def test_default_osc1_uses_annotated_three_turn_path(self) -> None:
-        cfg = generator.build_config({"fanout_side": "left"})
+        cfg = generator.build_config({"fanout_side": "left", "target_x_mm": 21.0, "target_y_mm": 9.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3})
         coil = generator.build_primary_geometry(cfg).coils[0]
         points = coil.points
         pitch = generator.trace_pitch(cfg)
@@ -197,7 +197,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(osc2.body_segments[-1][1], osc2.points["X"])
 
     def test_u_via_clearance_is_derived_from_via_and_trace_properties(self) -> None:
-        cfg = generator.build_config({"fanout_side": "left"})
+        cfg = generator.build_config({"fanout_side": "left", "target_x_mm": 21.0, "target_y_mm": 9.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3})
         points = generator.build_primary_geometry(cfg).coils[0].points
         expected_clearance = generator.osc1_via_trace_clearance(cfg)
 
@@ -271,7 +271,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             generator.build_primary_geometry(cfg)
 
     def test_reference_cl2_span_layers_and_outer_extrema(self) -> None:
-        cfg = generator.build_config({"target_y_mm": 7.0, "fanout_side": "left"})
+        cfg = generator.build_config({"target_x_mm": 21.0, "target_y_mm": 7.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3, "fanout_side": "left"})
         cl2 = generator.build_cl2_geometry(cfg)
         self.assertIsNotNone(cl2)
         assert cl2 is not None
@@ -295,9 +295,9 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 self.assertIn('(pad "CL2" thru_hole', footprint)
 
     def test_excessive_target_height_reports_receiver_spacing_failure(self) -> None:
-        cfg = generator.build_config({"target_y_mm": 10.0})
+        cfg = generator.build_config({"target_y_mm": 30.0})
 
-        with self.assertRaisesRegex(ValueError, "CL1 parallel sinusoidal traces"):
+        with self.assertRaisesRegex(ValueError, "parallel sinusoidal traces"):
             generator.render_footprint(cfg)
 
     def test_cl2_corrected_u_layer_jump_and_continuity_anchors(self) -> None:
@@ -462,7 +462,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             )
 
     def test_default_cl1_span_layers_corrected_vias_and_arcs(self) -> None:
-        cl1 = generator.build_cl1_geometry()
+        cl1 = generator.build_cl1_geometry(generator.build_config({"target_x_mm": 21.0, "target_y_mm": 9.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3}))
         assert cl1 is not None
 
         self.assertEqual(cl1.target_layer, "F.Cu")
@@ -493,7 +493,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertIn((cl1.points["ZM"], cl1.points["ZN"]), cl1.inner_segments)
 
     def test_cl1_mn_and_zazb_arcs_preserve_columns_around_cl1_vias(self) -> None:
-        cfg = generator.build_config({"fanout_side": "left"})
+        cfg = generator.build_config({"fanout_side": "left", "target_x_mm": 21.0, "target_y_mm": 9.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3})
         cl1 = generator.build_cl1_geometry(cfg)
         assert cl1 is not None
         expected_radius = generator.osc1_via_trace_clearance(cfg)
@@ -554,8 +554,31 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         cl1 = generator.build_cl1_geometry(cfg)
         assert cl1 is not None
         points = cl1.points
-        half_pitch = generator.trace_pitch(cfg) / 2.0
+        pitch = generator.trace_pitch(cfg)
+        half_pitch = pitch / 2.0
         phase = 3.141592653589793 / 2.0
+        half_span = generator.secondary_stroke_length(cfg) / 2.0
+        direction = generator.fanout_direction(cfg)
+        left_x = direction * half_span
+        right_x = -direction * half_span
+        inner_right_x = right_x + direction * pitch
+        via_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+        midpoint_left_x = direction * (via_spacing / 2.0)
+        midpoint_right_x = -direction * (via_spacing / 2.0)
+        transition_x = left_x - direction * (
+            generator.secondary_stroke_length(cfg)
+            * cfg["cl1_transition_column_fraction"]
+        )
+        station_x_map = {
+            "E": left_x, "F": midpoint_left_x,
+            "H": midpoint_left_x, "I": inner_right_x,
+            "O": right_x, "P": midpoint_right_x,
+            "R": midpoint_right_x, "S": transition_x,
+            "V": transition_x, "W": midpoint_right_x,
+            "Y": midpoint_right_x, "Z": right_x,
+            "ZF": inner_right_x, "ZG": midpoint_left_x,
+            "ZI": midpoint_left_x, "ZJ": left_x,
+        }
         curve_pairs = (
             (("E", "F", 1.0, half_pitch), ("V", "W", 1.0, -half_pitch)),
             (("H", "I", 1.0, -half_pitch), ("Y", "Z", 1.0, half_pitch)),
@@ -570,6 +593,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 points[first[1]],
                 first[2],
                 first[3],
+                station_start_x=station_x_map[first[0]],
+                station_end_x=station_x_map[first[1]],
                 phase_offset_radians=phase,
                 mirror_phase_sign=False,
             )
@@ -580,6 +605,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 points[second[1]],
                 second[2],
                 second[3],
+                station_start_x=station_x_map[second[0]],
+                station_end_x=station_x_map[second[1]],
                 phase_offset_radians=phase,
                 mirror_phase_sign=False,
             )

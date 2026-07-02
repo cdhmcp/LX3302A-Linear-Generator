@@ -27,8 +27,8 @@ Arc = tuple[Point, Point, Point]
 MAIN_PROPERTIES = {
     # Moving target and measurement-region inputs
     "target_x_mm": 7.0,
-    "target_y_mm": 11.0,
-    "measurement_range_mm": 30.0, #stroke range clamp assumed
+    "target_y_mm": 21.0,
+    "measurement_range_mm": 50.0, #stroke range clamp assumed
     "limit_before_mm": 0.5,
     "limit_after_mm": 0.5,
     "secondary_period_multiplier": 2.0,
@@ -785,6 +785,7 @@ def secondary_curve_segments(
     """Sample part of a full-span sine rail while connecting mapped transition points."""
     stroke_length = secondary_stroke_length(cfg)
     effective_phase = phase_sign * (-fanout_direction(cfg) if mirror_phase_sign else 1.0)
+    has_explicit_reference = reference_start is not None
     reference_start = start if reference_start is None else reference_start
     reference_end = end if reference_end is None else reference_end
     station_start_x = start[0] if station_start_x is None else station_start_x
@@ -797,10 +798,12 @@ def secondary_curve_segments(
             / stroke_length
         ),
     )
+    raw_ref_start_x = reference_start[0] if has_explicit_reference else station_start_x
+    raw_ref_end_x = reference_end[0] if has_explicit_reference else station_end_x
     raw_start = secondary_rail_point(
         cfg,
         dimensions,
-        reference_start[0],
+        raw_ref_start_x,
         effective_phase,
         rail_offset,
         phase_offset_radians,
@@ -808,7 +811,7 @@ def secondary_curve_segments(
     raw_end = secondary_rail_point(
         cfg,
         dimensions,
-        reference_end[0],
+        raw_ref_end_x,
         effective_phase,
         rail_offset,
         phase_offset_radians,
@@ -817,9 +820,12 @@ def secondary_curve_segments(
     for index in range(sample_count + 1):
         fraction = index / sample_count
         station_x = station_start_x + ((station_end_x - station_start_x) * fraction)
-        reference_fraction = (station_x - reference_start[0]) / (
-            reference_end[0] - reference_start[0]
-        )
+        if has_explicit_reference:
+            reference_fraction = (station_x - reference_start[0]) / (
+                reference_end[0] - reference_start[0]
+            )
+        else:
+            reference_fraction = fraction
         raw_point = secondary_rail_point(
             cfg,
             dimensions,
@@ -1183,13 +1189,44 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     midpoint_left_x = -(via_spacing / 2.0)
     midpoint_right_x = via_spacing / 2.0
     outer_top = -amplitude
-    inner_top = outer_top + pitch
-    inner_bottom = amplitude - pitch
-    transition_inner_bottom = secondary_rail_point(
-        cfg, dimensions, transition_x, 1.0, -(pitch / 2.0), math.pi / 2.0
-    )[1]
-    transition_inner_top = -transition_inner_bottom
     outer_bottom = amplitude
+    phase_offset = math.pi / 2.0
+    pt_F = secondary_rail_point(
+        cfg, dimensions, midpoint_left_x, 1.0, half_pitch, phase_offset
+    )
+    pt_H = secondary_rail_point(
+        cfg, dimensions, midpoint_left_x, 1.0, -half_pitch, phase_offset
+    )
+    pt_I = secondary_rail_point(
+        cfg, dimensions, inner_right_x, 1.0, -half_pitch, phase_offset
+    )
+    pt_P = secondary_rail_point(
+        cfg, dimensions, midpoint_right_x, -1.0, -half_pitch, phase_offset
+    )
+    pt_R = secondary_rail_point(
+        cfg, dimensions, midpoint_right_x, -1.0, half_pitch, phase_offset
+    )
+    pt_S = secondary_rail_point(
+        cfg, dimensions, transition_x, -1.0, half_pitch, phase_offset
+    )
+    pt_V = secondary_rail_point(
+        cfg, dimensions, transition_x, 1.0, -half_pitch, phase_offset
+    )
+    pt_W = secondary_rail_point(
+        cfg, dimensions, midpoint_right_x, 1.0, -half_pitch, phase_offset
+    )
+    pt_Y = secondary_rail_point(
+        cfg, dimensions, midpoint_right_x, 1.0, half_pitch, phase_offset
+    )
+    pt_ZF = secondary_rail_point(
+        cfg, dimensions, inner_right_x, -1.0, half_pitch, phase_offset
+    )
+    pt_ZG = secondary_rail_point(
+        cfg, dimensions, midpoint_left_x, -1.0, half_pitch, phase_offset
+    )
+    pt_ZI = secondary_rail_point(
+        cfg, dimensions, midpoint_left_x, -1.0, -half_pitch, phase_offset
+    )
     end_column_delta = right_x - inner_right_x
     detour_column_y = math.sqrt(
         (via_clearance * via_clearance) - (end_column_delta * end_column_delta)
@@ -1212,10 +1249,10 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         "C": (left_x, entrance_y),
         "D": (left_x, lower_via_y),
         "E": (left_x, outer_bottom),
-        "F": (midpoint_left_x, inner_top),
+        "F": pt_F,
         "G": (midpoint_left_x, upper_via_y),
-        "H": (midpoint_left_x, outer_top),
-        "I": (inner_right_x, inner_bottom),
+        "H": pt_H,
+        "I": pt_I,
         "J": (inner_right_x, lower_via_y),
         "K": (inner_right_x, cl2_crossing_half_height),
         "L": (inner_right_x, -cl2_crossing_half_height),
@@ -1223,16 +1260,16 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         "M": (inner_right_x, upper_via_y + via_clearance),
         "N": (right_x, upper_via_y - detour_column_y),
         "O": (right_x, outer_top),
-        "P": (midpoint_right_x, inner_bottom),
+        "P": pt_P,
         "Q": (midpoint_right_x, lower_via_y),
-        "R": (midpoint_right_x, outer_bottom),
-        "S": (transition_x, transition_inner_top),
+        "R": pt_R,
+        "S": pt_S,
         "T": (transition_x, upper_via_y),
         "U": (transition_x, lower_via_y),
-        "V": (transition_x, transition_inner_bottom),
-        "W": (midpoint_right_x, outer_top),
+        "V": pt_V,
+        "W": pt_W,
         "X": (midpoint_right_x, upper_via_y),
-        "Y": (midpoint_right_x, inner_top),
+        "Y": pt_Y,
         "Z": (right_x, outer_bottom),
         # ZA-ZB is the analogous arc around CL1 via J.
         "ZA": (right_x, lower_via_y + detour_column_y),
@@ -1240,10 +1277,10 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         "ZC": (inner_right_x, cl2_crossing_half_height),
         "ZD": (inner_right_x, -cl2_crossing_half_height),
         "ZE": (inner_right_x, upper_via_y),
-        "ZF": (inner_right_x, inner_top),
-        "ZG": (midpoint_left_x, outer_bottom),
+        "ZF": pt_ZF,
+        "ZG": pt_ZG,
         "ZH": (midpoint_left_x, lower_via_y),
-        "ZI": (midpoint_left_x, inner_bottom),
+        "ZI": pt_ZI,
         "ZJ": (left_x, outer_top),
         "ZK": (left_x, entrance_y - via_clearance),
         "ZL": (left_x - via_clearance, entrance_y),
@@ -1310,8 +1347,30 @@ def build_cl1_routes(
     crossover_segments: list[Segment] = []
     target_arcs: list[Arc] = []
     inner_arcs: list[Arc] = []
-    half_pitch = trace_pitch(cfg) / 2.0
+    pitch = trace_pitch(cfg)
+    half_pitch = pitch / 2.0
     phase_offset = math.pi / 2.0
+    half_span = secondary_stroke_length(cfg) / 2.0
+    direction = fanout_direction(cfg)
+    left_x = direction * half_span
+    right_x = -direction * half_span
+    inner_right_x = right_x + direction * pitch
+    via_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    midpoint_left_x = direction * (via_spacing / 2.0)
+    midpoint_right_x = -direction * (via_spacing / 2.0)
+    transition_x = left_x - direction * (
+        secondary_stroke_length(cfg) * cfg["cl1_transition_column_fraction"]
+    )
+    station_x_map: dict[str, float] = {
+        "E": left_x, "F": midpoint_left_x,
+        "H": midpoint_left_x, "I": inner_right_x,
+        "O": right_x, "P": midpoint_right_x,
+        "R": midpoint_right_x, "S": transition_x,
+        "V": transition_x, "W": midpoint_right_x,
+        "Y": midpoint_right_x, "Z": right_x,
+        "ZF": inner_right_x, "ZG": midpoint_left_x,
+        "ZI": midpoint_left_x, "ZJ": left_x,
+    }
 
     def line(collection: list[Segment], start: str, end: str) -> None:
         collection.append((points[start], points[end]))
@@ -1331,6 +1390,8 @@ def build_cl1_routes(
                 points[end],
                 phase_sign,
                 rail_offset,
+                station_start_x=station_x_map[start],
+                station_end_x=station_x_map[end],
                 phase_offset_radians=phase_offset,
                 mirror_phase_sign=False,
             )
@@ -1459,6 +1520,27 @@ def validate_cl1_clearance(
 
     half_pitch = trace_pitch(cfg) / 2.0
     phase_offset = math.pi / 2.0
+    half_span = secondary_stroke_length(cfg) / 2.0
+    direction = fanout_direction(cfg)
+    left_x = direction * half_span
+    right_x = -direction * half_span
+    inner_right_x = right_x + direction * trace_pitch(cfg)
+    via_spacing_val = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    midpoint_left_x = direction * (via_spacing_val / 2.0)
+    midpoint_right_x = -direction * (via_spacing_val / 2.0)
+    transition_x = left_x - direction * (
+        secondary_stroke_length(cfg) * cfg["cl1_transition_column_fraction"]
+    )
+    station_x_map: dict[str, float] = {
+        "E": left_x, "F": midpoint_left_x,
+        "H": midpoint_left_x, "I": inner_right_x,
+        "O": right_x, "P": midpoint_right_x,
+        "R": midpoint_right_x, "S": transition_x,
+        "V": transition_x, "W": midpoint_right_x,
+        "Y": midpoint_right_x, "Z": right_x,
+        "ZF": inner_right_x, "ZG": midpoint_left_x,
+        "ZI": midpoint_left_x, "ZJ": left_x,
+    }
     parallel_curves = (
         (("E", "F", 1.0, half_pitch), ("V", "W", 1.0, -half_pitch)),
         (("H", "I", 1.0, -half_pitch), ("Y", "Z", 1.0, half_pitch)),
@@ -1474,6 +1556,8 @@ def validate_cl1_clearance(
             points[first[1]],
             first[2],
             first[3],
+            station_start_x=station_x_map[first[0]],
+            station_end_x=station_x_map[first[1]],
             phase_offset_radians=phase_offset,
             mirror_phase_sign=False,
         )
@@ -1484,6 +1568,8 @@ def validate_cl1_clearance(
             points[second[1]],
             second[2],
             second[3],
+            station_start_x=station_x_map[second[0]],
+            station_end_x=station_x_map[second[1]],
             phase_offset_radians=phase_offset,
             mirror_phase_sign=False,
         )
