@@ -25,24 +25,23 @@ Arc = tuple[Point, Point, Point]
 # =============================================================================
 # Start here for normal sensor-size and placement changes.
 MAIN_PROPERTIES = {
-    # Moving target and measurement-region inputs
-    "target_x_mm": 7.0,
-    "target_y_mm": 21.0,
-    "measurement_range_mm": 50.0, #stroke range clamp assumed
-    "limit_before_mm": 0.5,
-    "limit_after_mm": 0.5,
+    # Moving target and stroke inputs
+    "target_x_mm": 20.0,            # target width
+    "target_y_mm": 7.0,             # target height
+    "stroke_range_mm": 70.0,        # typically total mechanical travel of target + width of target
     "secondary_period_multiplier": 2.0,
     "secondary_y_reduction_mm": 1.5,
 
     # Primary oscillator sizing
     "primary_end_extension_mm": 3.0,
     "primary_y_margin_mm": 0.075,
-    "number_of_primary_turns": 5,
+    "number_of_primary_turns": 4,
 
-    # Placement and output
-    "target_side": "top",
-    "fanout_side": "right",
-    "output_dir": "InductiveSensors.pretty",
+    # Placement
+    "target_side": "top",    # valid options: top OR bottom
+    "fanout_side": "left",      # valid options: right OR left
+
+    # Naming
     "footprint_name": "LX3302A_LINEAR_SENSOR_COILS",
     "reference_text": "REF**",
     "primary_input_pad_name": "VIN",
@@ -52,6 +51,9 @@ MAIN_PROPERTIES = {
     "cl2_return_pad_name": "CL2-GND",
     "cl1_output_pad_name": "CL1",
     "cl1_return_pad_name": "CL1-GND",
+
+    # Output
+    "output_dir": "InductiveSensors.pretty",
     "generate_osc1": True,
     "generate_osc2": True,
     "generate_cl2": True,
@@ -160,12 +162,7 @@ def build_config(overrides: dict | None = None) -> dict:
 def calculate_dimensions(cfg: dict) -> SensorDimensions:
     """Calculate receiver reference bounds and the primary outer centerline."""
     secondary_period = cfg["target_x_mm"] * cfg["secondary_period_multiplier"]
-    secondary_length = (
-        cfg["measurement_range_mm"]
-        + cfg["limit_before_mm"]
-        + cfg["limit_after_mm"]
-        + cfg["target_x_mm"]
-    )
+    secondary_length = cfg["stroke_range_mm"]
     secondary_width = cfg["target_y_mm"] - cfg["secondary_y_reduction_mm"]
     primary_length = secondary_length + (2.0 * cfg["primary_end_extension_mm"])
     primary_width = secondary_width + (2.0 * cfg["primary_y_margin_mm"])
@@ -345,7 +342,7 @@ def path_to_path_distance(first: tuple[Segment, ...], second: tuple[Segment, ...
 
 def secondary_stroke_length(cfg: dict) -> float:
     """Return the active waveform span shared by the two secondary coils."""
-    return cfg["measurement_range_mm"] + cfg["target_x_mm"]
+    return cfg["stroke_range_mm"]
 
 
 def primary_inner_half_height(cfg: dict, dimensions: SensorDimensions) -> float:
@@ -360,7 +357,7 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
     positive_values = (
         "target_x_mm",
         "target_y_mm",
-        "measurement_range_mm",
+        "stroke_range_mm",
         "secondary_period_multiplier",
         "primary_end_extension_mm",
         "primary_y_margin_mm",
@@ -377,7 +374,7 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
     for name in positive_values:
         if cfg[name] <= 0:
             raise ValueError(f"{name} must be > 0.")
-    for name in ("limit_before_mm", "limit_after_mm", "secondary_y_reduction_mm"):
+    for name in ("secondary_y_reduction_mm",):
         if cfg[name] < 0:
             raise ValueError(f"{name} must be >= 0.")
 
@@ -1803,7 +1800,9 @@ def main() -> None:
     cl1_geometry = build_cl1_geometry(cfg, geometry, cl2_geometry)
     output_path = write_linear_sensor_footprint(cfg)
     dims = geometry.dimensions
+    measurement_range = cfg["stroke_range_mm"] - cfg["target_x_mm"]
     print(f"Wrote {output_path}")
+    print(f"Measurement range: {measurement_range:.3f} mm")
     print(
         "Primary outer centerline envelope: "
         f"{dims.primary_length_mm:.3f} mm x {dims.primary_width_mm:.3f} mm"

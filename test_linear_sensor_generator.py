@@ -6,7 +6,7 @@ import linear_sensor_generator as generator
 
 class LinearSensorGeneratorTests(unittest.TestCase):
     def test_reference_dimensions_and_primary_layers(self) -> None:
-        cfg = generator.build_config({"target_x_mm": 21.0, "target_y_mm": 7.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3})
+        cfg = generator.build_config({"target_x_mm": 21.0, "target_y_mm": 7.0, "stroke_range_mm": 51.0, "number_of_primary_turns": 3})
         geometry = generator.build_primary_geometry(cfg)
         osc1, osc2 = geometry.coils
 
@@ -23,7 +23,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(osc2.escape_segments, ())
 
     def test_default_osc1_uses_annotated_three_turn_path(self) -> None:
-        cfg = generator.build_config({"fanout_side": "left", "target_x_mm": 21.0, "target_y_mm": 9.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3})
+        cfg = generator.build_config({"fanout_side": "left", "target_x_mm": 21.0, "target_y_mm": 9.0, "stroke_range_mm": 51.0, "number_of_primary_turns": 3})
         coil = generator.build_primary_geometry(cfg).coils[0]
         points = coil.points
         pitch = generator.trace_pitch(cfg)
@@ -197,7 +197,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(osc2.body_segments[-1][1], osc2.points["X"])
 
     def test_u_via_clearance_is_derived_from_via_and_trace_properties(self) -> None:
-        cfg = generator.build_config({"fanout_side": "left", "target_x_mm": 21.0, "target_y_mm": 9.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3})
+        cfg = generator.build_config({"fanout_side": "left", "target_x_mm": 21.0, "target_y_mm": 9.0, "stroke_range_mm": 51.0, "number_of_primary_turns": 3})
         points = generator.build_primary_geometry(cfg).coils[0].points
         expected_clearance = generator.osc1_via_trace_clearance(cfg)
 
@@ -271,7 +271,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             generator.build_primary_geometry(cfg)
 
     def test_reference_cl2_span_layers_and_outer_extrema(self) -> None:
-        cfg = generator.build_config({"target_x_mm": 21.0, "target_y_mm": 7.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3, "fanout_side": "left"})
+        cfg = generator.build_config({"target_x_mm": 21.0, "target_y_mm": 7.0, "stroke_range_mm": 51.0, "number_of_primary_turns": 3, "fanout_side": "left"})
         cl2 = generator.build_cl2_geometry(cfg)
         self.assertIsNotNone(cl2)
         assert cl2 is not None
@@ -462,7 +462,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             )
 
     def test_default_cl1_span_layers_corrected_vias_and_arcs(self) -> None:
-        cl1 = generator.build_cl1_geometry(generator.build_config({"target_x_mm": 21.0, "target_y_mm": 9.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3}))
+        cl1 = generator.build_cl1_geometry(generator.build_config({"target_x_mm": 21.0, "target_y_mm": 9.0, "stroke_range_mm": 51.0, "number_of_primary_turns": 3}))
         assert cl1 is not None
 
         self.assertEqual(cl1.target_layer, "F.Cu")
@@ -493,7 +493,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertIn((cl1.points["ZM"], cl1.points["ZN"]), cl1.inner_segments)
 
     def test_cl1_mn_and_zazb_arcs_preserve_columns_around_cl1_vias(self) -> None:
-        cfg = generator.build_config({"fanout_side": "left", "target_x_mm": 21.0, "target_y_mm": 9.0, "measurement_range_mm": 50.0, "number_of_primary_turns": 3})
+        cfg = generator.build_config({"fanout_side": "left", "target_x_mm": 21.0, "target_y_mm": 9.0, "stroke_range_mm": 51.0, "number_of_primary_turns": 3})
         cl1 = generator.build_cl1_geometry(cfg)
         assert cl1 is not None
         expected_radius = generator.osc1_via_trace_clearance(cfg)
