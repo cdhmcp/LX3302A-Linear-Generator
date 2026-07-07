@@ -28,8 +28,7 @@ MAIN_PROPERTIES = {
     # Moving target and stroke inputs
     "target_x_mm": 20.0,            # target width
     "target_y_mm": 7.0,             # target height
-    "stroke_range_mm": 70.0,        # typically total mechanical travel of target + width of target
-    "secondary_period_multiplier": 2.0,
+    "stroke_range_mm": 70.0,        # typically total mechanical travel of target + width of target for best primary-to-secondary coupling
     "secondary_y_reduction_mm": 1.5,
 
     # Primary oscillator sizing
@@ -88,7 +87,6 @@ FINE_TUNING_PROPERTIES = {
 class SensorDimensions:
     """Calculated sensing and primary envelope dimensions in millimeters."""
 
-    secondary_period_mm: float
     secondary_length_mm: float
     secondary_width_mm: float
     primary_length_mm: float
@@ -161,13 +159,11 @@ def build_config(overrides: dict | None = None) -> dict:
 
 def calculate_dimensions(cfg: dict) -> SensorDimensions:
     """Calculate receiver reference bounds and the primary outer centerline."""
-    secondary_period = cfg["target_x_mm"] * cfg["secondary_period_multiplier"]
     secondary_length = cfg["stroke_range_mm"]
     secondary_width = cfg["target_y_mm"] - cfg["secondary_y_reduction_mm"]
     primary_length = secondary_length + (2.0 * cfg["primary_end_extension_mm"])
     primary_width = secondary_width + (2.0 * cfg["primary_y_margin_mm"])
     return SensorDimensions(
-        secondary_period_mm=secondary_period,
         secondary_length_mm=secondary_length,
         secondary_width_mm=secondary_width,
         primary_length_mm=primary_length,
@@ -358,7 +354,6 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         "target_x_mm",
         "target_y_mm",
         "stroke_range_mm",
-        "secondary_period_multiplier",
         "primary_end_extension_mm",
         "primary_y_margin_mm",
         "trace_width_mm",

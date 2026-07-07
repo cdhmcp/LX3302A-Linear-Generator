@@ -10,7 +10,6 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         geometry = generator.build_primary_geometry(cfg)
         osc1, osc2 = geometry.coils
 
-        self.assertEqual(geometry.dimensions.secondary_period_mm, 42.0)
         self.assertEqual(geometry.dimensions.secondary_length_mm, 72.0)
         self.assertEqual(geometry.dimensions.secondary_width_mm, 5.5)
         self.assertEqual(geometry.dimensions.primary_length_mm, 78.0)
