@@ -29,12 +29,16 @@ MAIN_PROPERTIES = {
     "target_x_mm": 20.0,            # target width
     "target_y_mm": 7.0,             # target height
     "stroke_range_mm": 70.0,        # typically total mechanical travel of target + width of target for best primary-to-secondary coupling
-    "secondary_y_reduction_mm": 1.5,
 
-    # Primary oscillator sizing
+
+    # Primary oscillator settings
     "primary_end_extension_mm": 3.0,
     "primary_y_margin_mm": 0.075,
     "number_of_primary_turns": 4,
+
+    # Secondary receiver settings
+    "number_of_secondary_turns": 2,     # only supports 2 right now
+    "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Placement
     "target_side": "top",    # valid options: top OR bottom
@@ -58,8 +62,6 @@ MAIN_PROPERTIES = {
     "generate_cl2": True,
     "generate_cl1": True,
 
-    # The documented secondary point maps currently cover two turns.
-    "number_of_secondary_turns": 2,
 }
 
 
