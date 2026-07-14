@@ -21,10 +21,9 @@ Arc = tuple[Point, Point, Point]
 
 
 # =============================================================================
-# Main Properties
+# Properties
 # =============================================================================
-# Start here for normal sensor-size and placement changes.
-MAIN_PROPERTIES = {
+PROPERTIES = {
     # Moving target and stroke inputs
     "target_x_mm": 20.0,            # target width
     "target_y_mm": 7.0,             # target height
@@ -62,14 +61,7 @@ MAIN_PROPERTIES = {
     "generate_cl2": True,
     "generate_cl1": True,
 
-}
-
-
-# =============================================================================
-# Fine Tuning Properties
-# =============================================================================
-# These values tune fabrication constraints and the fanout outside the coil.
-FINE_TUNING_PROPERTIES = {
+    # Fabrication constraints and fanout tuning
     "trace_width_mm": 6 * MIL_TO_MM,
     "trace_spacing_mm": 7 * MIL_TO_MM,
     "via_hole_size_mm": 10 * MIL_TO_MM,
@@ -150,10 +142,7 @@ class CL1Coil:
 
 def build_config(overrides: dict | None = None) -> dict:
     """Combine user-editable settings and optional programmatic overrides."""
-    cfg = {
-        **MAIN_PROPERTIES,
-        **FINE_TUNING_PROPERTIES,
-    }
+    cfg = {**PROPERTIES}
     if overrides:
         cfg.update(overrides)
     return cfg
