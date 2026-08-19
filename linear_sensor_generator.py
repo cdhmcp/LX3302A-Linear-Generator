@@ -28,20 +28,27 @@ PROPERTIES = {
     "target_x_mm": 20.0,            # target width
     "target_y_mm": 7.0,             # target height
     "stroke_range_mm": 70.0,        # typically total mechanical travel of target + width of target for best primary-to-secondary coupling
-
+    "target_side": "top",           # valid options: top OR bottom
 
     # Primary oscillator settings
-    "primary_end_extension_mm": 3.0,
-    "primary_y_margin_mm": 0.075,
-    "number_of_primary_turns": 4,
+    "primary_end_extension_mm": 3.0,    # this is how far the primary extends past the secondary windings on either end of the sensor
+    "primary_y_margin_mm": 0.075,       # this is how far the primary extends past the secondary windings in the vertical (y) direction
+    "number_of_primary_turns": 3,
 
     # Secondary receiver settings
     "number_of_secondary_turns": 2,     # only supports 2 right now
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
-    # Placement
-    "target_side": "top",    # valid options: top OR bottom
-    "fanout_side": "left",      # valid options: right OR left
+    # Trace & Via constraints 
+    "trace_width_mm": 8 * MIL_TO_MM,
+    "trace_spacing_mm": 9 * MIL_TO_MM,
+    "via_hole_size_mm": 10 * MIL_TO_MM,
+    "via_diameter_mm": 20 * MIL_TO_MM,
+ 
+    # Fanout tuning
+    "fanout_side": "left",              # valid options: right OR left
+    "terminal_escape_length_mm": 10.0,
+    "osc1_vin_exit_offset_mm": 1.2,
 
     # Naming
     "footprint_name": "LX3302A_LINEAR_SENSOR_COILS",
@@ -61,13 +68,7 @@ PROPERTIES = {
     "generate_cl2": True,
     "generate_cl1": True,
 
-    # Fabrication constraints and fanout tuning
-    "trace_width_mm": 6 * MIL_TO_MM,
-    "trace_spacing_mm": 7 * MIL_TO_MM,
-    "via_hole_size_mm": 10 * MIL_TO_MM,
-    "via_diameter_mm": 20 * MIL_TO_MM,
-    "terminal_escape_length_mm": 5.0,
-    "osc1_vin_exit_offset_mm": 1.2,
+
     "secondary_curve_samples_per_cycle": 512,
     "secondary_jump_runup_via_multiplier": 3.0,
     "secondary_jump_detour_via_multiplier": 0.35,
