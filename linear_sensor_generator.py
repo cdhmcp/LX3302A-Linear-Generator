@@ -26,7 +26,7 @@ Arc = tuple[Point, Point, Point]
 PROPERTIES = {
     # Moving target and stroke inputs
     "target_x_mm": 20.0,            # target width
-    "target_y_mm": 7.0,             # target height
+    "target_y_mm": 9.0,             # target height
     "stroke_range_mm": 70.0,        # typically total mechanical travel of target + width of target for best primary-to-secondary coupling
     "target_side": "top",           # valid options: top OR bottom
 
@@ -1156,7 +1156,54 @@ def build_cl2_geometry(
     )
 
 
-def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Point]:
+def cl1_right_end_columns(cfg: dict) -> tuple[float, float]:
+    """Return the outer and next turn columns in a left-entry frame."""
+    outer_turn_x = secondary_stroke_length(cfg) / 2.0
+    turn_pitch = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
+    next_turn_x = outer_turn_x - turn_pitch
+    return outer_turn_x, next_turn_x
+
+
+def cl1_crossover_turn_half_height(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    cl2_geometry: SecondaryCoil | None,
+    turn_x: float,
+) -> float:
+    """Return the smallest CL1 end-turn half-height that clears CL2 and OSC2."""
+    minimum_half_height = (cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]) / 2.0
+    maximum_half_height = primary_inner_half_height(cfg, dimensions) - trace_pitch(cfg)
+    if maximum_half_height + GEOMETRY_TOLERANCE_MM < minimum_half_height:
+        raise ValueError("CL1 crossover turn exceeds the available OSC2 keep-out window.")
+    if cl2_geometry is None:
+        return minimum_half_height
+
+    required_clearance = osc1_via_trace_clearance(cfg)
+    if fanout_direction(cfg) > 0:
+        cl2_segments = tuple(
+            ((-start[0], start[1]), (-end[0], end[1]))
+            for start, end in cl2_geometry.target_segments + cl2_geometry.inner_segments
+        )
+    else:
+        cl2_segments = cl2_geometry.target_segments + cl2_geometry.inner_segments
+    search_step = 0.001
+    candidate = minimum_half_height
+    while candidate <= maximum_half_height + GEOMETRY_TOLERANCE_MM:
+        test_point = (turn_x, candidate)
+        nearest_cl2_trace = min(
+            point_to_segment_distance(test_point, segment) for segment in cl2_segments
+        )
+        if nearest_cl2_trace + GEOMETRY_TOLERANCE_MM >= required_clearance:
+            return candidate
+        candidate += search_step
+    raise ValueError("CL1 crossover turn cannot clear CL2 within the OSC2 keep-out window.")
+
+
+def build_cl1_point_map(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    cl2_geometry: SecondaryCoil | None = None,
+) -> dict[str, Point]:
     """Construct the annotated two-turn CL1 quadrature point map."""
     half_span = secondary_stroke_length(cfg) / 2.0
     amplitude = dimensions.secondary_width_mm / 2.0
@@ -1167,8 +1214,7 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     upper_via_y = -(primary_inner_half_height(cfg, dimensions) - via_clearance)
     lower_via_y = -upper_via_y
     left_x = -half_span
-    right_x = half_span
-    inner_right_x = right_x - pitch
+    right_x, next_turn_x = cl1_right_end_columns(cfg)
     transition_x = left_x + (secondary_stroke_length(cfg) * cfg["cl1_transition_column_fraction"])
     midpoint_left_x = -(via_spacing / 2.0)
     midpoint_right_x = via_spacing / 2.0
@@ -1181,9 +1227,10 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     pt_H = secondary_rail_point(
         cfg, dimensions, midpoint_left_x, 1.0, -half_pitch, phase_offset
     )
-    pt_I = secondary_rail_point(
-        cfg, dimensions, inner_right_x, 1.0, -half_pitch, phase_offset
+    raw_pt_I = secondary_rail_point(
+        cfg, dimensions, right_x, 1.0, -half_pitch, phase_offset
     )
+    pt_I = (right_x, raw_pt_I[1])
     pt_P = secondary_rail_point(
         cfg, dimensions, midpoint_right_x, -1.0, -half_pitch, phase_offset
     )
@@ -1202,18 +1249,25 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     pt_Y = secondary_rail_point(
         cfg, dimensions, midpoint_right_x, 1.0, half_pitch, phase_offset
     )
-    pt_ZF = secondary_rail_point(
-        cfg, dimensions, inner_right_x, -1.0, half_pitch, phase_offset
+    raw_pt_Z = secondary_rail_point(
+        cfg, dimensions, next_turn_x, 1.0, half_pitch, phase_offset
     )
+    pt_Z = (next_turn_x, raw_pt_Z[1])
+    raw_pt_ZF = secondary_rail_point(
+        cfg, dimensions, next_turn_x, -1.0, half_pitch, phase_offset
+    )
+    pt_ZF = (next_turn_x, raw_pt_ZF[1])
     pt_ZG = secondary_rail_point(
         cfg, dimensions, midpoint_left_x, -1.0, half_pitch, phase_offset
     )
     pt_ZI = secondary_rail_point(
         cfg, dimensions, midpoint_left_x, -1.0, -half_pitch, phase_offset
     )
-    end_column_delta = right_x - inner_right_x
-    detour_column_y = math.sqrt(
-        (via_clearance * via_clearance) - (end_column_delta * end_column_delta)
+    outer_turn_half_height = cl1_crossover_turn_half_height(
+        cfg, dimensions, cl2_geometry, right_x
+    )
+    next_turn_half_height = cl1_crossover_turn_half_height(
+        cfg, dimensions, cl2_geometry, next_turn_x
     )
 
     # CL1 is the straight-through row between the VIN and OSC1 terminals.
@@ -1223,10 +1277,6 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     return_terminal_y = terminal_row_y(cfg, "CL1-GND")
     entry_b_x = terminal_x + cfg["terminal_escape_length_mm"]
     return_zm_x = terminal_x + abs(return_terminal_y - entrance_y)
-
-    # K-L and ZC-ZD are compact semicircles centered on this column. Their
-    # radius leaves one trace pitch to CL2 J/ZG at the adjacent end column.
-    cl2_crossing_half_height = math.hypot(pitch, half_pitch) + pitch
     points: dict[str, Point] = {
         "A": (terminal_x, terminal_y),
         "B": (entry_b_x, entrance_y),
@@ -1237,12 +1287,8 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         "G": (midpoint_left_x, upper_via_y),
         "H": pt_H,
         "I": pt_I,
-        "J": (inner_right_x, lower_via_y),
-        "K": (inner_right_x, cl2_crossing_half_height),
-        "L": (inner_right_x, -cl2_crossing_half_height),
-        # M-N arcs around CL1 via ZE while retaining the mapped x columns.
-        "M": (inner_right_x, upper_via_y + via_clearance),
-        "N": (right_x, upper_via_y - detour_column_y),
+        "K": (right_x, outer_turn_half_height),
+        "L": (right_x, -outer_turn_half_height),
         "O": (right_x, outer_top),
         "P": pt_P,
         "Q": (midpoint_right_x, lower_via_y),
@@ -1254,13 +1300,9 @@ def build_cl1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
         "W": pt_W,
         "X": (midpoint_right_x, upper_via_y),
         "Y": pt_Y,
-        "Z": (right_x, outer_bottom),
-        # ZA-ZB is the analogous arc around CL1 via J.
-        "ZA": (right_x, lower_via_y + detour_column_y),
-        "ZB": (inner_right_x, lower_via_y - via_clearance),
-        "ZC": (inner_right_x, cl2_crossing_half_height),
-        "ZD": (inner_right_x, -cl2_crossing_half_height),
-        "ZE": (inner_right_x, upper_via_y),
+        "Z": pt_Z,
+        "ZB": (next_turn_x, next_turn_half_height),
+        "ZC": (next_turn_x, -next_turn_half_height),
         "ZF": pt_ZF,
         "ZG": pt_ZG,
         "ZH": (midpoint_left_x, lower_via_y),
@@ -1329,7 +1371,6 @@ def build_cl1_routes(
     target_segments: list[Segment] = []
     inner_segments: list[Segment] = []
     crossover_segments: list[Segment] = []
-    target_arcs: list[Arc] = []
     inner_arcs: list[Arc] = []
     pitch = trace_pitch(cfg)
     half_pitch = pitch / 2.0
@@ -1337,8 +1378,9 @@ def build_cl1_routes(
     half_span = secondary_stroke_length(cfg) / 2.0
     direction = fanout_direction(cfg)
     left_x = direction * half_span
-    right_x = -direction * half_span
-    inner_right_x = right_x + direction * pitch
+    outer_turn_x, next_turn_x = cl1_right_end_columns(cfg)
+    outer_turn_x *= -direction
+    next_turn_x *= -direction
     via_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
     midpoint_left_x = direction * (via_spacing / 2.0)
     midpoint_right_x = -direction * (via_spacing / 2.0)
@@ -1347,12 +1389,12 @@ def build_cl1_routes(
     )
     station_x_map: dict[str, float] = {
         "E": left_x, "F": midpoint_left_x,
-        "H": midpoint_left_x, "I": inner_right_x,
-        "O": right_x, "P": midpoint_right_x,
+        "H": midpoint_left_x, "I": outer_turn_x,
+        "O": outer_turn_x, "P": midpoint_right_x,
         "R": midpoint_right_x, "S": transition_x,
         "V": transition_x, "W": midpoint_right_x,
-        "Y": midpoint_right_x, "Z": right_x,
-        "ZF": inner_right_x, "ZG": midpoint_left_x,
+        "Y": midpoint_right_x, "Z": next_turn_x,
+        "ZF": next_turn_x, "ZG": midpoint_left_x,
         "ZI": midpoint_left_x, "ZJ": left_x,
     }
 
@@ -1389,12 +1431,9 @@ def build_cl1_routes(
     line(target_segments, "F", "G")
     line(inner_segments, "G", "H")
     curve(inner_segments, "H", "I", 1.0, -half_pitch)
-    line(inner_segments, "I", "J")
-    line(target_segments, "J", "K")
-    target_arcs.append(outside_semicircle_arc(cfg, points["K"], points["L"]))
-    line(target_segments, "L", "M")
-    target_arcs.append(via_clearance_arc(cfg, points["M"], points["N"], points["ZE"]))
-    line(target_segments, "N", "O")
+    line(inner_segments, "I", "K")
+    line(crossover_segments, "K", "L")
+    line(target_segments, "L", "O")
     curve(target_segments, "O", "P", -1.0, -half_pitch)
     line(target_segments, "P", "Q")
     line(inner_segments, "Q", "R")
@@ -1406,12 +1445,9 @@ def build_cl1_routes(
     line(target_segments, "W", "X")
     line(inner_segments, "X", "Y")
     curve(inner_segments, "Y", "Z", 1.0, half_pitch)
-    line(inner_segments, "Z", "ZA")
-    inner_arcs.append(via_clearance_arc(cfg, points["ZA"], points["ZB"], points["J"]))
-    line(inner_segments, "ZB", "ZC")
-    inner_arcs.append(outside_semicircle_arc(cfg, points["ZC"], points["ZD"]))
-    line(inner_segments, "ZD", "ZE")
-    line(target_segments, "ZE", "ZF")
+    line(inner_segments, "Z", "ZB")
+    line(crossover_segments, "ZB", "ZC")
+    line(target_segments, "ZC", "ZF")
     curve(target_segments, "ZF", "ZG", -1.0, half_pitch)
     line(target_segments, "ZG", "ZH")
     line(inner_segments, "ZH", "ZI")
@@ -1424,7 +1460,7 @@ def build_cl1_routes(
         tuple(target_segments),
         tuple(inner_segments),
         tuple(crossover_segments),
-        tuple(target_arcs),
+        (),
         tuple(inner_arcs),
     )
 
@@ -1449,12 +1485,19 @@ def validate_cl1_clearance(
         raise ValueError("CL1 endpoint violates minimum clearance to the primary end winding.")
 
     minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    for first, second in (("G", "X"), ("Q", "ZH")):
-        if distance(points[first], points[second]) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance:
-            raise ValueError(f"CL1 paired vias {first}/{second} violate plated via clearance.")
+    cl1_vias = ("A", "C", "D", "G", "K", "L", "Q", "T", "U", "X", "ZB", "ZC", "ZH", "ZN")
+    for first_index, first in enumerate(cl1_vias):
+        for second in cl1_vias[first_index + 1:]:
+            if (
+                distance(points[first], points[second]) + GEOMETRY_TOLERANCE_MM
+                < minimum_pad_distance
+            ):
+                raise ValueError(
+                    f"CL1 paired vias {first}/{second} violate plated via clearance."
+                )
 
     minimum_trace_distance = osc1_via_trace_clearance(cfg)
-    for via_label in ("G", "X", "Q", "ZH", "J", "ZE"):
+    for via_label in ("G", "X", "Q", "ZH", "K", "L", "ZB", "ZC"):
         nearest_primary_trace = min(
             point_to_segment_distance(points[via_label], segment)
             for coil in primary_geometry.coils
@@ -1475,40 +1518,43 @@ def validate_cl1_clearance(
                 if distance(points[terminal], point) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance:
                     raise ValueError(f"CL1 terminal {terminal} collides with an existing via.")
 
-    via_centered_arcs = (
-        ("M-N", target_arcs[1], points["ZE"]),
-        ("ZA-ZB", inner_arcs[0], points["J"]),
-        ("ZK-ZL", inner_arcs[2], points["C"]),
-    )
-    for name, arc, via_center in via_centered_arcs:
-        for point in arc:
-            if (
-                abs(distance(point, via_center) - minimum_trace_distance)
-                > GEOMETRY_TOLERANCE_MM
-            ):
+    if cl2_geometry is not None:
+        cl2_segments = cl2_geometry.target_segments + cl2_geometry.inner_segments
+        for via_label in ("K", "L", "ZB", "ZC"):
+            nearest_cl2_trace = min(
+                point_to_segment_distance(points[via_label], segment)
+                for segment in cl2_segments
+            )
+            if nearest_cl2_trace + GEOMETRY_TOLERANCE_MM < minimum_trace_distance:
                 raise ValueError(
-                    f"CL1 {name} arc does not maintain clearance from its transition via."
+                    f"CL1 crossover via {via_label} violates clearance to CL2."
                 )
 
-    if cl2_geometry is not None:
-        crossing_arcs = (("K-L", target_arcs[0]), ("ZC-ZD", inner_arcs[1]))
-        for name, arc in crossing_arcs:
-            center = (arc[0][0], (arc[0][1] + arc[2][1]) / 2.0)
-            radius = distance(center, arc[0])
-            for label in ("J", "ZG"):
-                radial_clearance = radius - distance(center, cl2_geometry.points[label])
-                if radial_clearance + GEOMETRY_TOLERANCE_MM < trace_pitch(cfg):
-                    raise ValueError(
-                        f"CL1 {name} arc violates clearance to CL2 {label}."
-                    )
+        same_layer_checks = (
+            (("I", "K"), cl2_geometry.inner_segments, cl2_geometry.inner_layer),
+            (("L", "O"), cl2_geometry.target_segments, cl2_geometry.target_layer),
+            (("Z", "ZB"), cl2_geometry.inner_segments, cl2_geometry.inner_layer),
+            (("ZC", "ZF"), cl2_geometry.target_segments, cl2_geometry.target_layer),
+        )
+        for (start, end), cl2_layer_segments, layer_name in same_layer_checks:
+            cl1_segment = (points[start], points[end])
+            nearest_cl2_trace = min(
+                segment_to_segment_distance(cl1_segment, segment)
+                for segment in cl2_layer_segments
+            )
+            if nearest_cl2_trace + GEOMETRY_TOLERANCE_MM < trace_pitch(cfg):
+                raise ValueError(
+                    f"CL1 segment {start}-{end} violates clearance on {layer_name}."
+                )
 
     half_pitch = trace_pitch(cfg) / 2.0
     phase_offset = math.pi / 2.0
     half_span = secondary_stroke_length(cfg) / 2.0
     direction = fanout_direction(cfg)
     left_x = direction * half_span
-    right_x = -direction * half_span
-    inner_right_x = right_x + direction * trace_pitch(cfg)
+    outer_turn_x, next_turn_x = cl1_right_end_columns(cfg)
+    outer_turn_x *= -direction
+    next_turn_x *= -direction
     via_spacing_val = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
     midpoint_left_x = direction * (via_spacing_val / 2.0)
     midpoint_right_x = -direction * (via_spacing_val / 2.0)
@@ -1517,12 +1563,12 @@ def validate_cl1_clearance(
     )
     station_x_map: dict[str, float] = {
         "E": left_x, "F": midpoint_left_x,
-        "H": midpoint_left_x, "I": inner_right_x,
-        "O": right_x, "P": midpoint_right_x,
+        "H": midpoint_left_x, "I": outer_turn_x,
+        "O": outer_turn_x, "P": midpoint_right_x,
         "R": midpoint_right_x, "S": transition_x,
         "V": transition_x, "W": midpoint_right_x,
-        "Y": midpoint_right_x, "Z": right_x,
-        "ZF": inner_right_x, "ZG": midpoint_left_x,
+        "Y": midpoint_right_x, "Z": next_turn_x,
+        "ZF": next_turn_x, "ZG": midpoint_left_x,
         "ZI": midpoint_left_x, "ZJ": left_x,
     }
     parallel_curves = (
@@ -1531,7 +1577,7 @@ def validate_cl1_clearance(
         (("O", "P", -1.0, -half_pitch), ("ZF", "ZG", -1.0, half_pitch)),
         (("R", "S", -1.0, half_pitch), ("ZI", "ZJ", -1.0, -half_pitch)),
     )
-    polygonal_transition_tolerance = 0.002
+    polygonal_transition_tolerance = 0.003
     for first, second in parallel_curves:
         first_curve = secondary_curve_segments(
             cfg,
@@ -1581,7 +1627,7 @@ def build_cl1_geometry(
     primary_geometry = primary_geometry or build_primary_geometry(cfg)
     if cl2_geometry is None and cfg["generate_cl2"]:
         cl2_geometry = build_cl2_geometry(cfg, primary_geometry)
-    points = build_cl1_point_map(cfg, dimensions)
+    points = build_cl1_point_map(cfg, dimensions, cl2_geometry)
     (
         target_segments,
         inner_segments,
@@ -1613,7 +1659,7 @@ def build_cl1_geometry(
         crossover_segments=crossover_segments,
         target_arcs=target_arcs,
         inner_arcs=inner_arcs,
-        via_labels=("A", "C", "D", "G", "J", "Q", "T", "U", "X", "ZE", "ZH", "ZN"),
+        via_labels=("A", "C", "D", "G", "K", "L", "Q", "T", "U", "X", "ZB", "ZC", "ZH", "ZN"),
     )
 
 
