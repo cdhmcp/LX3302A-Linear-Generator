@@ -1,5 +1,6 @@
 import math
 import unittest
+from unittest import mock
 
 import linear_sensor_generator as generator
 
@@ -299,6 +300,150 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "parallel sinusoidal traces"):
             generator.render_footprint(cfg)
 
+    def test_allow_invalid_geometry_skips_receiver_validation_for_debug_rendering(self) -> None:
+        strict_cfg = generator.build_config({"number_of_secondary_turns": 3})
+        with mock.patch.object(
+            generator,
+            "validate_multiturn_cl1_clearance",
+            side_effect=ValueError("debug receiver violation"),
+        ):
+            with self.assertRaisesRegex(ValueError, "debug receiver violation"):
+                generator.build_cl1_geometry(strict_cfg)
+
+        debug_cfg = generator.build_config(
+            {"number_of_secondary_turns": 3, "allow_invalid_geometry": True}
+        )
+        with mock.patch.object(
+            generator,
+            "validate_multiturn_cl1_clearance",
+            side_effect=ValueError("debug receiver violation"),
+        ):
+            cl1 = generator.build_cl1_geometry(debug_cfg)
+
+        self.assertIsNotNone(cl1)
+
+    def test_multiturn_receivers_build_in_strict_mode_for_one_to_five_turns(self) -> None:
+        for turns in range(1, 6):
+            with self.subTest(turns=turns):
+                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                primary = generator.build_primary_geometry(cfg)
+                cl2 = generator.build_cl2_geometry(cfg, primary)
+                cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+
+                self.assertIsNotNone(cl2)
+                self.assertIsNotNone(cl1)
+
+    def test_multiturn_cl2_columns_center_on_quarter_span_and_stay_inside_outer_envelope(self) -> None:
+        for turns in (1, 3, 4, 5):
+            with self.subTest(turns=turns):
+                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                dimensions = generator.calculate_dimensions(cfg)
+                cl2 = generator.build_cl2_geometry(cfg)
+                assert cl2 is not None
+                half_span = generator.secondary_stroke_length(cfg) / 2.0
+                quarter_span = half_span / 2.0
+                via_spacing = generator.secondary_via_spacing(cfg)
+                midpoint = (turns - 1) / 2.0
+                expected_left_columns = [
+                    -quarter_span + ((midpoint - index) * via_spacing)
+                    for index in range(turns)
+                ]
+                actual_left_columns = [
+                    cl2.points[f"TURN{index + 1}_LEFT_OUTER"][0]
+                    for index in range(turns)
+                ]
+
+                for actual, expected in zip(actual_left_columns, expected_left_columns):
+                    self.assertAlmostEqual(actual, expected)
+                self.assertLessEqual(
+                    max(abs(point[1]) for point in cl2.points.values()),
+                    (dimensions.secondary_width_mm / 2.0) + 0.01,
+                )
+
+    def test_multiturn_cl1_columns_center_on_midpoint_and_step_inward(self) -> None:
+        for turns in (1, 3, 4, 5):
+            with self.subTest(turns=turns):
+                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                dimensions = generator.calculate_dimensions(cfg)
+                primary = generator.build_primary_geometry(cfg)
+                cl2 = generator.build_cl2_geometry(cfg, primary)
+                cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+                assert cl1 is not None
+                via_spacing = generator.secondary_via_spacing(cfg)
+                half_span = generator.secondary_stroke_length(cfg) / 2.0
+                midpoint = (turns - 1) / 2.0
+                expected_midpoints = [
+                    (index - midpoint) * via_spacing
+                    for index in range(turns)
+                ]
+                actual_midpoints = [
+                    cl1.points[f"TURN{index + 1}_FWD_MID_END"][0]
+                    for index in range(turns)
+                ]
+                expected_right_columns = [
+                    half_span - (index * via_spacing)
+                    for index in range(turns)
+                ]
+                actual_right_columns = [
+                    cl1.points[f"TURN{index + 1}_RIGHT_UPPER_VIA"][0]
+                    for index in range(turns)
+                ]
+
+                for actual, expected in zip(actual_midpoints, expected_midpoints):
+                    self.assertAlmostEqual(actual, expected)
+                for actual, expected in zip(actual_right_columns, expected_right_columns):
+                    self.assertAlmostEqual(actual, expected)
+                if turns > 1:
+                    transition_base = (
+                        -half_span
+                        + (
+                            generator.secondary_stroke_length(cfg)
+                            * cfg["cl1_transition_column_fraction"]
+                        )
+                    )
+                    actual_transitions = [
+                        cl1.points[f"TURN{index + 1}_LEFT_TRANSITION_UPPER_VIA"][0]
+                        for index in range(turns - 1)
+                    ]
+                    expected_transitions = [
+                        transition_base + (index * via_spacing)
+                        for index in range(turns - 1)
+                    ]
+                    for actual, expected in zip(actual_transitions, expected_transitions):
+                        self.assertAlmostEqual(actual, expected)
+                self.assertLessEqual(
+                    max(abs(point[1]) for point in cl1.points.values()),
+                    (dimensions.secondary_width_mm / 2.0) + 0.01,
+                )
+
+    def test_multiturn_receivers_mirror_generated_points_on_bottom_right_fanout(self) -> None:
+        left_cfg = generator.build_config(
+            {"number_of_secondary_turns": 4, "target_side": "bottom", "fanout_side": "left"}
+        )
+        right_cfg = generator.build_config(
+            {"number_of_secondary_turns": 4, "target_side": "bottom", "fanout_side": "right"}
+        )
+        left_primary = generator.build_primary_geometry(left_cfg)
+        right_primary = generator.build_primary_geometry(right_cfg)
+        left_cl2 = generator.build_cl2_geometry(left_cfg, left_primary)
+        right_cl2 = generator.build_cl2_geometry(right_cfg, right_primary)
+        left_cl1 = generator.build_cl1_geometry(left_cfg, left_primary, left_cl2)
+        right_cl1 = generator.build_cl1_geometry(right_cfg, right_primary, right_cl2)
+        assert left_cl2 is not None and right_cl2 is not None
+        assert left_cl1 is not None and right_cl1 is not None
+
+        self.assertEqual(right_cl2.target_layer, "B.Cu")
+        self.assertEqual(right_cl2.inner_layer, "In2.Cu")
+        self.assertEqual(right_cl1.target_layer, "B.Cu")
+        self.assertEqual(right_cl1.inner_layer, "In2.Cu")
+        self.assertEqual(right_cl1.crossover_layer, "In1.Cu")
+        for name in ("TURN1_START", "TURN1_LEFT_OUTER", "TURN2_RIGHT_OUTER", "TURN4_RETURN_START", "ZP"):
+            self.assertAlmostEqual(right_cl2.points[name][0], -left_cl2.points[name][0])
+            self.assertAlmostEqual(right_cl2.points[name][1], left_cl2.points[name][1])
+        for name in ("TURN1_START", "TURN2_FWD_MID_END", "TURN3_LEFT_TRANSITION_UPPER_VIA", "TURN4_RIGHT_UPPER_VIA", "ZN"):
+            self.assertAlmostEqual(right_cl1.points[name][0], -left_cl1.points[name][0])
+            self.assertAlmostEqual(right_cl1.points[name][1], left_cl1.points[name][1])
+
     def test_cl2_corrected_u_layer_jump_and_continuity_anchors(self) -> None:
         cfg = generator.build_config({"fanout_side": "left"})
         dimensions = generator.calculate_dimensions(cfg)
@@ -452,9 +597,16 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertIsNone(generator.build_cl2_geometry(cfg))
         self.assertNotIn('(pad "CL2" thru_hole', generator.render_footprint(cfg))
 
-    def test_cl2_rejects_unmapped_turn_counts_and_coarse_sampling(self) -> None:
-        with self.assertRaisesRegex(ValueError, "exactly two secondary turns"):
-            generator.build_cl2_geometry(generator.build_config({"number_of_secondary_turns": 3}))
+    def test_cl2_rejects_out_of_range_turn_counts_and_coarse_sampling(self) -> None:
+        for invalid_turns in (0, 6, 1.5, "3"):
+            with self.subTest(invalid_turns=invalid_turns):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "number_of_secondary_turns must be an integer between 1 and 5",
+                ):
+                    generator.build_cl2_geometry(
+                        generator.build_config({"number_of_secondary_turns": invalid_turns})
+                    )
         with self.assertRaisesRegex(ValueError, "integer >= 16"):
             generator.build_cl2_geometry(
                 generator.build_config({"secondary_curve_samples_per_cycle": 8})
