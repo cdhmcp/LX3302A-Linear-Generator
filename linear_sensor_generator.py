@@ -67,6 +67,7 @@ PROPERTIES = {
     "generate_osc2": True,
     "generate_cl2": True,
     "generate_cl1": True,
+    "allow_invalid_geometry": True,   # when True, skip copper/via validation checks so invalid footprints can still be rendered for visual debugging
 
 
     "secondary_curve_samples_per_cycle": 512,
@@ -176,6 +177,11 @@ def build_config(overrides: dict | None = None) -> dict:
     if overrides:
         cfg.update(overrides)
     return cfg
+
+
+def should_skip_geometry_validation(cfg: dict) -> bool:
+    """Return whether debug footprint generation should bypass validation errors."""
+    return cfg["allow_invalid_geometry"]
 
 
 def calculate_dimensions(cfg: dict) -> SensorDimensions:
@@ -472,6 +478,8 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         raise ValueError("generate_cl2 must be a boolean.")
     if not isinstance(cfg["generate_cl1"], bool):
         raise ValueError("generate_cl1 must be a boolean.")
+    if not isinstance(cfg["allow_invalid_geometry"], bool):
+        raise ValueError("allow_invalid_geometry must be a boolean.")
     if cfg["generate_osc2"] and not cfg["generate_osc1"]:
         raise ValueError("OSC2 requires OSC1 because it shares OSC1's VIN transition via.")
     if (
@@ -801,7 +809,8 @@ def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
     validate_config(cfg, dimensions)
     osc1_points = build_osc1_point_map(cfg, dimensions)
     osc1_body_segments, osc1_escape_segments = build_osc1_segments(cfg, osc1_points)
-    validate_osc1_clearance(cfg, osc1_points, osc1_body_segments, osc1_escape_segments)
+    if not should_skip_geometry_validation(cfg):
+        validate_osc1_clearance(cfg, osc1_points, osc1_body_segments, osc1_escape_segments)
     osc1_layer, osc2_layer = primary_layers(cfg)
     coils: list[PrimaryCoil] = [
         PrimaryCoil(
@@ -818,14 +827,15 @@ def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
     if cfg["generate_osc2"]:
         osc2_points = build_osc2_point_map(cfg, osc1_points)
         osc2_body_segments = build_osc2_segments(cfg, osc2_points)
-        validate_osc2_clearance(
-            cfg,
-            osc1_points,
-            osc1_body_segments,
-            osc1_escape_segments,
-            osc2_points,
-            osc2_body_segments,
-        )
+        if not should_skip_geometry_validation(cfg):
+            validate_osc2_clearance(
+                cfg,
+                osc1_points,
+                osc1_body_segments,
+                osc1_escape_segments,
+                osc2_points,
+                osc2_body_segments,
+            )
         coils.append(
             PrimaryCoil("OSC2", osc2_layer, osc2_layer, osc2_points, osc2_body_segments, ())
         )
@@ -1653,7 +1663,8 @@ def build_cl2_geometry(
     primary_geometry = primary_geometry or build_primary_geometry(cfg)
     if cfg["number_of_secondary_turns"] != 2:
         layout = build_multiturn_cl2_layout(cfg, dimensions)
-        validate_multiturn_cl2_clearance(cfg, dimensions, primary_geometry, layout)
+        if not should_skip_geometry_validation(cfg):
+            validate_multiturn_cl2_clearance(cfg, dimensions, primary_geometry, layout)
         return SecondaryCoil(
             name="CL2",
             target_layer=receiver_layers(cfg)[0],
@@ -1666,7 +1677,8 @@ def build_cl2_geometry(
         )
     points = build_cl2_point_map(cfg, dimensions)
     target_segments, inner_segments = build_cl2_segments(cfg, dimensions, points)
-    validate_cl2_clearance(cfg, dimensions, primary_geometry, points)
+    if not should_skip_geometry_validation(cfg):
+        validate_cl2_clearance(cfg, dimensions, primary_geometry, points)
     return SecondaryCoil(
         name="CL2",
         target_layer=receiver_layers(cfg)[0],
@@ -2578,13 +2590,14 @@ def build_cl1_geometry(
         cl2_geometry = build_cl2_geometry(cfg, primary_geometry)
     if cfg["number_of_secondary_turns"] != 2:
         layout = build_multiturn_cl1_layout(cfg, dimensions, cl2_geometry)
-        validate_multiturn_cl1_clearance(
-            cfg,
-            dimensions,
-            primary_geometry,
-            cl2_geometry,
-            layout,
-        )
+        if not should_skip_geometry_validation(cfg):
+            validate_multiturn_cl1_clearance(
+                cfg,
+                dimensions,
+                primary_geometry,
+                cl2_geometry,
+                layout,
+            )
         return CL1Coil(
             name="CL1",
             target_layer=receiver_layers(cfg)[0],
@@ -2607,18 +2620,19 @@ def build_cl1_geometry(
         target_arcs,
         inner_arcs,
     ) = build_cl1_routes(cfg, dimensions, points)
-    validate_cl1_clearance(
-        cfg,
-        dimensions,
-        primary_geometry,
-        cl2_geometry,
-        points,
-        target_segments,
-        inner_segments,
-        crossover_segments,
-        target_arcs,
-        inner_arcs,
-    )
+    if not should_skip_geometry_validation(cfg):
+        validate_cl1_clearance(
+            cfg,
+            dimensions,
+            primary_geometry,
+            cl2_geometry,
+            points,
+            target_segments,
+            inner_segments,
+            crossover_segments,
+            target_arcs,
+            inner_arcs,
+        )
     return CL1Coil(
         name="CL1",
         target_layer=receiver_layers(cfg)[0],
