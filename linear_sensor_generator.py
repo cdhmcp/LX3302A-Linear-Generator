@@ -2556,6 +2556,11 @@ def build_multiturn_cl1_layout(
         reverse_mid_via = str(spec["reverse_mid_via"])
         reverse_inner_start = str(spec["reverse_inner_start"])
         end_label = str(spec["end"])
+        inner_reverse_end = (
+            str(spec["left_transition_end"])
+            if "left_transition_end" in spec
+            else end_label
+        )
 
         target_forward = secondary_curve_segments(
             cfg,
@@ -2616,11 +2621,11 @@ def build_multiturn_cl1_layout(
             cfg,
             dimensions,
             points[reverse_inner_start],
-            points[end_label],
+            points[inner_reverse_end],
             -1.0,
             outer_offset,
             station_start_x=points[reverse_inner_start][0],
-            station_end_x=points[end_label][0],
+            station_end_x=points[inner_reverse_end][0],
             phase_offset_radians=phase_offset,
             mirror_phase_sign=False,
             amplitude_override=amplitude_override,

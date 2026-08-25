@@ -371,13 +371,23 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 assert cl1 is not None
                 via_spacing = generator.secondary_via_spacing(cfg)
                 half_span = generator.secondary_stroke_length(cfg) / 2.0
-                midpoint = (turns - 1) / 2.0
-                expected_midpoints = [
-                    (index - midpoint) * via_spacing
+                centered_midpoints = [
+                    (index - ((turns - 1) / 2.0)) * via_spacing
                     for index in range(turns)
                 ]
+                left_midpoints = [value for value in centered_midpoints if value < 0.0]
+                right_midpoints = [value for value in centered_midpoints if value > 0.0]
+                expected_midpoints: list[float] = []
+                for left, right in zip(left_midpoints, reversed(right_midpoints)):
+                    expected_midpoints.extend((left, right))
+                if turns % 2 == 1:
+                    expected_midpoints.append(0.0)
                 actual_midpoints = [
                     cl1.points[f"TURN{index + 1}_FWD_MID_END"][0]
+                    for index in range(turns)
+                ]
+                actual_reverse_midpoints = [
+                    cl1.points[f"TURN{index + 1}_REV_MID_END"][0]
                     for index in range(turns)
                 ]
                 expected_right_columns = [
@@ -391,6 +401,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
 
                 for actual, expected in zip(actual_midpoints, expected_midpoints):
                     self.assertAlmostEqual(actual, expected)
+                for forward, reverse in zip(actual_midpoints, actual_reverse_midpoints):
+                    self.assertAlmostEqual(reverse, -forward)
                 for actual, expected in zip(actual_right_columns, expected_right_columns):
                     self.assertAlmostEqual(actual, expected)
                 if turns > 1:
@@ -415,6 +427,26 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                     max(abs(point[1]) for point in cl1.points.values()),
                     (dimensions.secondary_width_mm / 2.0) + 0.01,
                 )
+
+    def test_multiturn_cl1_left_transition_handoff_stays_off_inner_next_start(self) -> None:
+        for turns in (3, 5):
+            with self.subTest(turns=turns):
+                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                primary = generator.build_primary_geometry(cfg)
+                cl2 = generator.build_cl2_geometry(cfg, primary)
+                cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+                assert cl1 is not None
+
+                inner_points = {
+                    point
+                    for segment in cl1.inner_segments
+                    for point in segment
+                }
+                for turn_index in range(1, turns):
+                    next_start = cl1.points[f"TURN{turn_index + 1}_START"]
+                    lower_via = cl1.points[f"TURN{turn_index}_LEFT_TRANSITION_LOWER_VIA"]
+                    self.assertIn((lower_via, next_start), cl1.target_segments)
+                    self.assertNotIn(next_start, inner_points)
 
     def test_multiturn_receivers_mirror_generated_points_on_bottom_right_fanout(self) -> None:
         left_cfg = generator.build_config(
