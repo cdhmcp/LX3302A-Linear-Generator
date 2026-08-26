@@ -1717,10 +1717,13 @@ def build_cl2_right_turnaround_plan(
                         candidate_plan.score,
                         candidate_plan.assignment,
                     )
-                    if (
-                        best_invalid_plan is None
-                        or invalid_rank_for_u < best_invalid_rank_for_u
-                    ):
+                    if best_invalid_rank_for_u is None:
+                        should_replace_invalid_plan = True
+                    else:
+                        should_replace_invalid_plan = (
+                            invalid_rank_for_u < best_invalid_rank_for_u
+                        )
+                    if should_replace_invalid_plan:
                         best_invalid_plan = candidate_plan
                         best_invalid_rank_for_u = invalid_rank_for_u
 
@@ -1728,6 +1731,7 @@ def build_cl2_right_turnaround_plan(
                 return best_valid_plan
 
             if best_invalid_plan is not None:
+                assert best_invalid_rank_for_u is not None
                 fallback_rank = (
                     best_invalid_rank_for_u[0],
                     packed_columns,
@@ -1736,10 +1740,11 @@ def build_cl2_right_turnaround_plan(
                     best_invalid_rank_for_u[2],
                     best_invalid_rank_for_u[3],
                 )
-                if (
-                    best_fallback_plan is None
-                    or fallback_rank < best_fallback_rank
-                ):
+                if best_fallback_rank is None:
+                    should_replace_fallback = True
+                else:
+                    should_replace_fallback = fallback_rank < best_fallback_rank
+                if should_replace_fallback:
                     best_fallback_plan = best_invalid_plan
                     best_fallback_rank = fallback_rank
 
