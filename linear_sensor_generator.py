@@ -2,7 +2,9 @@
 """KiCad footprint generator for LX3302A linear sensor coil layouts.
 
 OSC1 and OSC2 are built from their annotated primary-coil point maps. Receiver
-coils CL1 and CL2 are built from their annotated two-turn sinusoidal point maps.
+coils CL1 and CL2 are built from the generalized multi-turn layout for all
+valid turn counts. The original fixed-2-turn receiver point maps are retained
+below for reference and regression checks.
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ PROPERTIES = {
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
-    "number_of_secondary_turns": 4,     # valid range: 1..5
+    "number_of_secondary_turns": 2,     # valid range: 1..5
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Trace & Via constraints 
@@ -475,6 +477,14 @@ def mirror_arcs_horizontally(arcs: tuple[Arc, ...]) -> tuple[Arc, ...]:
         )
         for start, mid, end in arcs
     )
+
+
+def with_point_aliases(points: dict[str, Point], aliases: dict[str, str]) -> dict[str, Point]:
+    """Return a point-map copy with historical labels assigned to existing points."""
+    aliased_points = dict(points)
+    for alias, source_label in aliases.items():
+        aliased_points[alias] = points[source_label]
+    return aliased_points
 
 
 def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> None:
@@ -1060,8 +1070,11 @@ def secondary_corrected_rail_point(
     )
 
 
+# NOTE: Retained for historical reference and direct regression tests only.
+# The live CL2 generator now always uses build_multiturn_cl2_layout(),
+# including when number_of_secondary_turns == 2.
 def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Point]:
-    """Construct the annotated two-turn CL2 point map in a left-entry frame."""
+    """Construct the original annotated two-turn CL2 point map."""
     half_span = secondary_stroke_length(cfg) / 2.0
     quarter_span = half_span / 2.0
     amplitude = dimensions.secondary_width_mm / 2.0
@@ -1154,12 +1167,15 @@ def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Po
     return points
 
 
+# NOTE: Retained for historical reference and direct regression tests only.
+# The live CL2 generator now always uses build_multiturn_cl2_layout(),
+# including when number_of_secondary_turns == 2.
 def build_cl2_segments(
     cfg: dict,
     dimensions: SensorDimensions,
     points: dict[str, Point],
 ) -> tuple[tuple[Segment, ...], tuple[Segment, ...]]:
-    """Return CL2 copper segments assigned to its two receiver layers."""
+    """Return the original fixed-2-turn CL2 copper segments."""
     target_segments: list[Segment] = []
     inner_segments: list[Segment] = []
 
@@ -1262,13 +1278,16 @@ def build_cl2_segments(
     return tuple(target_segments), tuple(inner_segments)
 
 
+# NOTE: Retained for historical reference and direct regression tests only.
+# The live CL2 generator now always uses validate_multiturn_cl2_clearance(),
+# including when number_of_secondary_turns == 2.
 def validate_cl2_clearance(
     cfg: dict,
     dimensions: SensorDimensions,
     primary_geometry: PrimaryGeometry,
     points: dict[str, Point],
 ) -> None:
-    """Validate mapped CL2 terminal and paired-via clearance constraints."""
+    """Validate the original fixed-2-turn CL2 geometry."""
     minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
     for first, second in (("E", "Y"), ("H", "ZB"), ("O", "ZI"), ("R", "ZL")):
         if distance(points[first], points[second]) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance:
@@ -1322,7 +1341,7 @@ def build_multiturn_cl2_layout(
     cfg: dict,
     dimensions: SensorDimensions,
 ) -> SecondaryLayoutPlan:
-    """Build CL2 for adjustable turn counts while keeping the legacy outer envelope."""
+    """Build CL2 for all valid turn counts while keeping the legacy outer envelope."""
     half_span = secondary_stroke_length(cfg) / 2.0
     quarter_span = half_span / 2.0
     outer_offsets = secondary_turn_offsets(cfg)
@@ -1771,7 +1790,7 @@ def validate_multiturn_cl2_clearance(
     primary_geometry: PrimaryGeometry,
     layout: SecondaryLayoutPlan,
 ) -> None:
-    """Validate the generated CL2 spiral for non-legacy turn counts."""
+    """Validate the generated CL2 spiral for the generalized receiver path."""
     minimum_pad_distance = secondary_via_spacing(cfg)
     for first_index, first in enumerate(layout.via_labels):
         for second in layout.via_labels[first_index + 1:]:
@@ -1821,6 +1840,70 @@ def validate_multiturn_cl2_clearance(
                 )
 
 
+CL2_TWO_TURN_LEGACY_VIA_LABELS = (
+    "A",
+    "E",
+    "H",
+    "L",
+    "O",
+    "R",
+    "U",
+    "Y",
+    "ZB",
+    "ZE",
+    "ZI",
+    "ZL",
+    "ZP",
+)
+
+
+def cl2_two_turn_legacy_alias_points(points: dict[str, Point]) -> dict[str, Point]:
+    """Add historical fixed-2-turn CL2 labels to the generalized 2-turn point map."""
+    return with_point_aliases(
+        points,
+        {
+            "C": "TURN1_START",
+            "D": "TURN1_LEFT_OUTER",
+            "E": "TURN1_LEFT_UPPER_VIA",
+            "F": "TURN1_LEFT_INNER",
+            "G": "TURN1_RIGHT_INNER",
+            "H": "TURN1_RIGHT_LOWER_VIA",
+            "I": "TURN1_RIGHT_OUTER",
+            "J": "TURN1_RIGHT_END",
+            "K": "TURN1_RIGHT_RUNUP",
+            "L": "TURN1_RIGHT_DETOUR_VIA",
+            "M": "TURN1_RIGHT_RUNUP",
+            "N": "TURN1_REV_RIGHT_OUTER",
+            "O": "TURN1_REV_RIGHT_UPPER_VIA",
+            "P": "TURN1_REV_RIGHT_INNER",
+            "Q": "TURN1_REV_LEFT_INNER",
+            "R": "TURN1_REV_LEFT_LOWER_VIA",
+            "S": "TURN1_REV_LEFT_OUTER",
+            "T": "TURN1_LEFT_RUNUP",
+            "U": "TURN1_LEFT_DETOUR_VIA",
+            "V": "TURN1_LEFT_RECOVER",
+            "W": "TURN2_START",
+            "X": "TURN2_LEFT_OUTER",
+            "Y": "TURN2_LEFT_UPPER_VIA",
+            "Z": "TURN2_LEFT_INNER",
+            "ZA": "TURN2_RIGHT_INNER",
+            "ZB": "TURN2_RIGHT_LOWER_VIA",
+            "ZC": "TURN2_RIGHT_OUTER",
+            "ZD": "TURN2_RIGHT_RUNUP",
+            "ZE": "TURN2_RIGHT_DETOUR_VIA",
+            "ZF": "TURN2_RIGHT_RUNUP",
+            "ZG": "TURN2_RIGHT_END",
+            "ZH": "TURN2_REV_RIGHT_OUTER",
+            "ZI": "TURN2_REV_RIGHT_UPPER_VIA",
+            "ZJ": "TURN2_REV_RIGHT_INNER",
+            "ZK": "TURN2_REV_LEFT_INNER",
+            "ZL": "TURN2_REV_LEFT_LOWER_VIA",
+            "ZM": "TURN2_REV_LEFT_OUTER",
+            "ZN": "TURN2_RETURN_START",
+        },
+    )
+
+
 def build_cl2_geometry(
     cfg: dict | None = None,
     primary_geometry: PrimaryGeometry | None = None,
@@ -1832,33 +1915,23 @@ def build_cl2_geometry(
     dimensions = calculate_dimensions(cfg)
     validate_config(cfg, dimensions)
     primary_geometry = primary_geometry or build_primary_geometry(cfg)
-    if cfg["number_of_secondary_turns"] != 2:
-        layout = build_multiturn_cl2_layout(cfg, dimensions)
-        if not should_skip_geometry_validation(cfg):
-            validate_multiturn_cl2_clearance(cfg, dimensions, primary_geometry, layout)
-        return SecondaryCoil(
-            name="CL2",
-            target_layer=receiver_layers(cfg)[0],
-            inner_layer=receiver_layers(cfg)[1],
-            stroke_length_mm=secondary_stroke_length(cfg),
-            points=layout.points,
-            target_segments=layout.target_segments,
-            inner_segments=layout.inner_segments,
-            via_labels=layout.via_labels,
-        )
-    points = build_cl2_point_map(cfg, dimensions)
-    target_segments, inner_segments = build_cl2_segments(cfg, dimensions, points)
+    layout = build_multiturn_cl2_layout(cfg, dimensions)
     if not should_skip_geometry_validation(cfg):
-        validate_cl2_clearance(cfg, dimensions, primary_geometry, points)
+        validate_multiturn_cl2_clearance(cfg, dimensions, primary_geometry, layout)
+    points = layout.points
+    via_labels = layout.via_labels
+    if cfg["number_of_secondary_turns"] == 2:
+        points = cl2_two_turn_legacy_alias_points(layout.points)
+        via_labels = CL2_TWO_TURN_LEGACY_VIA_LABELS
     return SecondaryCoil(
         name="CL2",
         target_layer=receiver_layers(cfg)[0],
         inner_layer=receiver_layers(cfg)[1],
         stroke_length_mm=secondary_stroke_length(cfg),
         points=points,
-        target_segments=target_segments,
-        inner_segments=inner_segments,
-        via_labels=("A", "E", "H", "L", "O", "R", "U", "Y", "ZB", "ZE", "ZI", "ZL", "ZP"),
+        target_segments=layout.target_segments,
+        inner_segments=layout.inner_segments,
+        via_labels=via_labels,
     )
 
 
@@ -1927,12 +2000,15 @@ def cl1_crossover_turn_half_height(
     raise ValueError("CL1 crossover turn cannot clear CL2 within the OSC2 keep-out window.")
 
 
+# NOTE: Retained for historical reference and direct regression tests only.
+# The live CL1 generator now always uses build_multiturn_cl1_layout(),
+# including when number_of_secondary_turns == 2.
 def build_cl1_point_map(
     cfg: dict,
     dimensions: SensorDimensions,
     cl2_geometry: SecondaryCoil | None = None,
 ) -> dict[str, Point]:
-    """Construct the annotated two-turn CL1 quadrature point map."""
+    """Construct the original annotated two-turn CL1 quadrature point map."""
     half_span = secondary_stroke_length(cfg) / 2.0
     amplitude = dimensions.secondary_width_mm / 2.0
     pitch = trace_pitch(cfg)
@@ -2084,6 +2160,9 @@ def lower_fanout_via_arc(cfg: dict, start: Point, end: Point, center: Point) -> 
     )
 
 
+# NOTE: Retained for historical reference and direct regression tests only.
+# The live CL1 generator now always uses build_multiturn_cl1_layout(),
+# including when number_of_secondary_turns == 2.
 def build_cl1_routes(
     cfg: dict,
     dimensions: SensorDimensions,
@@ -2095,7 +2174,7 @@ def build_cl1_routes(
     tuple[Arc, ...],
     tuple[Arc, ...],
 ]:
-    """Return line and arc primitives for the corrected CL1 point sequence."""
+    """Return line and arc primitives for the original fixed-2-turn CL1 path."""
     target_segments: list[Segment] = []
     inner_segments: list[Segment] = []
     crossover_segments: list[Segment] = []
@@ -2193,6 +2272,9 @@ def build_cl1_routes(
     )
 
 
+# NOTE: Retained for historical reference and direct regression tests only.
+# The live CL1 generator now always uses validate_multiturn_cl1_clearance(),
+# including when number_of_secondary_turns == 2.
 def validate_cl1_clearance(
     cfg: dict,
     dimensions: SensorDimensions,
@@ -2205,7 +2287,7 @@ def validate_cl1_clearance(
     target_arcs: tuple[Arc, ...],
     inner_arcs: tuple[Arc, ...],
 ) -> None:
-    """Validate CL1 envelope, transition vias, and OSC2-layer crossovers."""
+    """Validate the original fixed-2-turn CL1 geometry."""
     endpoint_clearance = (
         (dimensions.primary_length_mm - secondary_stroke_length(cfg)) / 2.0
     )
@@ -2346,7 +2428,7 @@ def build_multiturn_cl1_layout(
     dimensions: SensorDimensions,
     cl2_geometry: SecondaryCoil | None = None,
 ) -> CL1LayoutPlan:
-    """Build CL1 for adjustable turn counts while preserving the legacy turn order."""
+    """Build CL1 for all valid turn counts while preserving the legacy turn order."""
     phase_offset = math.pi / 2.0
     left_x = -(secondary_stroke_length(cfg) / 2.0)
     terminal_x = -((dimensions.primary_length_mm / 2.0) + cfg["terminal_escape_length_mm"])
@@ -2709,7 +2791,7 @@ def validate_multiturn_cl1_clearance(
     cl2_geometry: SecondaryCoil | None,
     layout: CL1LayoutPlan,
 ) -> None:
-    """Validate the generated CL1 spiral for non-legacy turn counts."""
+    """Validate the generated CL1 spiral for the generalized receiver path."""
     endpoint_clearance = (
         (dimensions.primary_length_mm - secondary_stroke_length(cfg)) / 2.0
     )
@@ -2804,6 +2886,59 @@ def validate_multiturn_cl1_clearance(
                 )
 
 
+CL1_TWO_TURN_LEGACY_VIA_LABELS = (
+    "A",
+    "C",
+    "D",
+    "G",
+    "K",
+    "L",
+    "Q",
+    "T",
+    "U",
+    "X",
+    "ZB",
+    "ZC",
+    "ZH",
+    "ZN",
+)
+
+
+def cl1_two_turn_legacy_alias_points(points: dict[str, Point]) -> dict[str, Point]:
+    """Add historical fixed-2-turn CL1 labels to the generalized 2-turn point map."""
+    return with_point_aliases(
+        points,
+        {
+            "E": "TURN1_START",
+            "F": "TURN1_FWD_MID_END",
+            "G": "TURN1_FWD_MID_VIA",
+            "H": "TURN1_FWD_INNER_START",
+            "I": "TURN1_RIGHT_END",
+            "K": "TURN1_RIGHT_UPPER_VIA",
+            "L": "TURN1_RIGHT_LOWER_VIA",
+            "O": "TURN1_REV_START",
+            "P": "TURN1_REV_MID_END",
+            "Q": "TURN1_REV_MID_VIA",
+            "R": "TURN1_REV_INNER_START",
+            "S": "TURN1_LEFT_TRANSITION_END",
+            "T": "TURN1_LEFT_TRANSITION_UPPER_VIA",
+            "U": "TURN1_LEFT_TRANSITION_LOWER_VIA",
+            "V": "TURN2_START",
+            "W": "TURN2_FWD_MID_END",
+            "X": "TURN2_FWD_MID_VIA",
+            "Y": "TURN2_FWD_INNER_START",
+            "Z": "TURN2_RIGHT_END",
+            "ZB": "TURN2_RIGHT_UPPER_VIA",
+            "ZC": "TURN2_RIGHT_LOWER_VIA",
+            "ZF": "TURN2_REV_START",
+            "ZG": "TURN2_REV_MID_END",
+            "ZH": "TURN2_REV_MID_VIA",
+            "ZI": "TURN2_REV_INNER_START",
+            "ZJ": "TURN2_RETURN_START",
+        },
+    )
+
+
 def build_cl1_geometry(
     cfg: dict | None = None,
     primary_geometry: PrimaryGeometry | None = None,
@@ -2818,51 +2953,20 @@ def build_cl1_geometry(
     primary_geometry = primary_geometry or build_primary_geometry(cfg)
     if cl2_geometry is None and cfg["generate_cl2"]:
         cl2_geometry = build_cl2_geometry(cfg, primary_geometry)
-    if cfg["number_of_secondary_turns"] != 2:
-        layout = build_multiturn_cl1_layout(cfg, dimensions, cl2_geometry)
-        if not should_skip_geometry_validation(cfg):
-            validate_multiturn_cl1_clearance(
-                cfg,
-                dimensions,
-                primary_geometry,
-                cl2_geometry,
-                layout,
-            )
-        return CL1Coil(
-            name="CL1",
-            target_layer=receiver_layers(cfg)[0],
-            inner_layer=receiver_layers(cfg)[1],
-            crossover_layer=receiver_crossover_layer(cfg),
-            stroke_length_mm=secondary_stroke_length(cfg),
-            points=layout.points,
-            target_segments=layout.target_segments,
-            inner_segments=layout.inner_segments,
-            crossover_segments=layout.crossover_segments,
-            target_arcs=layout.target_arcs,
-            inner_arcs=layout.inner_arcs,
-            via_labels=layout.via_labels,
-        )
-    points = build_cl1_point_map(cfg, dimensions, cl2_geometry)
-    (
-        target_segments,
-        inner_segments,
-        crossover_segments,
-        target_arcs,
-        inner_arcs,
-    ) = build_cl1_routes(cfg, dimensions, points)
+    layout = build_multiturn_cl1_layout(cfg, dimensions, cl2_geometry)
     if not should_skip_geometry_validation(cfg):
-        validate_cl1_clearance(
+        validate_multiturn_cl1_clearance(
             cfg,
             dimensions,
             primary_geometry,
             cl2_geometry,
-            points,
-            target_segments,
-            inner_segments,
-            crossover_segments,
-            target_arcs,
-            inner_arcs,
+            layout,
         )
+    points = layout.points
+    via_labels = layout.via_labels
+    if cfg["number_of_secondary_turns"] == 2:
+        points = cl1_two_turn_legacy_alias_points(layout.points)
+        via_labels = CL1_TWO_TURN_LEGACY_VIA_LABELS
     return CL1Coil(
         name="CL1",
         target_layer=receiver_layers(cfg)[0],
@@ -2870,12 +2974,12 @@ def build_cl1_geometry(
         crossover_layer=receiver_crossover_layer(cfg),
         stroke_length_mm=secondary_stroke_length(cfg),
         points=points,
-        target_segments=target_segments,
-        inner_segments=inner_segments,
-        crossover_segments=crossover_segments,
-        target_arcs=target_arcs,
-        inner_arcs=inner_arcs,
-        via_labels=("A", "C", "D", "G", "K", "L", "Q", "T", "U", "X", "ZB", "ZC", "ZH", "ZN"),
+        target_segments=layout.target_segments,
+        inner_segments=layout.inner_segments,
+        crossover_segments=layout.crossover_segments,
+        target_arcs=layout.target_arcs,
+        inner_arcs=layout.inner_arcs,
+        via_labels=via_labels,
     )
 
 

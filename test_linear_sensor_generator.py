@@ -333,6 +333,38 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 self.assertIsNotNone(cl2)
                 self.assertIsNotNone(cl1)
 
+    def test_two_turn_receivers_use_generalized_builders_but_keep_legacy_labels(self) -> None:
+        cfg = generator.build_config({"number_of_secondary_turns": 2})
+        primary = generator.build_primary_geometry(cfg)
+
+        with mock.patch.object(
+            generator, "build_cl2_point_map", side_effect=AssertionError("legacy CL2 point map used")
+        ), mock.patch.object(
+            generator, "build_cl2_segments", side_effect=AssertionError("legacy CL2 segments used")
+        ), mock.patch.object(
+            generator,
+            "validate_cl2_clearance",
+            side_effect=AssertionError("legacy CL2 validation used"),
+        ), mock.patch.object(
+            generator, "build_cl1_point_map", side_effect=AssertionError("legacy CL1 point map used")
+        ), mock.patch.object(
+            generator, "build_cl1_routes", side_effect=AssertionError("legacy CL1 routes used")
+        ), mock.patch.object(
+            generator,
+            "validate_cl1_clearance",
+            side_effect=AssertionError("legacy CL1 validation used"),
+        ):
+            cl2 = generator.build_cl2_geometry(cfg, primary)
+            cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+
+        assert cl2 is not None and cl1 is not None
+        for label in ("C", "J", "T", "U", "ZE", "ZN", "ZP"):
+            self.assertIn(label, cl2.points)
+        for label in ("E", "K", "L", "T", "U", "ZB", "ZC", "ZJ", "ZN"):
+            self.assertIn(label, cl1.points)
+        self.assertEqual(cl2.via_labels, generator.CL2_TWO_TURN_LEGACY_VIA_LABELS)
+        self.assertEqual(cl1.via_labels, generator.CL1_TWO_TURN_LEGACY_VIA_LABELS)
+
     def test_multiturn_cl2_columns_center_on_quarter_span_and_stay_inside_outer_envelope(self) -> None:
         for turns in (1, 3, 4, 5):
             with self.subTest(turns=turns):
@@ -517,13 +549,12 @@ class LinearSensorGeneratorTests(unittest.TestCase):
     def test_cl2_corrected_u_layer_jump_and_continuity_anchors(self) -> None:
         cfg = generator.build_config({"fanout_side": "left"})
         dimensions = generator.calculate_dimensions(cfg)
-        cl2 = generator.build_cl2_geometry(cfg)
-        assert cl2 is not None
-        points = cl2.points
+        points = generator.build_cl2_point_map(cfg, dimensions)
+        target_segments, inner_segments = generator.build_cl2_segments(cfg, dimensions, points)
         half_pitch = generator.trace_pitch(cfg) / 2.0
 
-        self.assertIn((points["T"], points["U"]), cl2.inner_segments)
-        self.assertIn((points["U"], points["V"]), cl2.target_segments)
+        self.assertIn((points["T"], points["U"]), inner_segments)
+        self.assertIn((points["U"], points["V"]), target_segments)
         self.assertEqual(points["T"], points["V"])
         transition_station_x = (
             points["W"][0]
@@ -543,12 +574,12 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             points["W"],
         )
         self.assertEqual(points["T"], expected_t)
-        self.assertTrue(any(start == points["S"] for start, _ in cl2.inner_segments))
-        self.assertTrue(any(end == points["T"] for _, end in cl2.inner_segments))
-        self.assertTrue(any(start == points["V"] for start, _ in cl2.target_segments))
-        self.assertTrue(any(end == points["W"] for _, end in cl2.target_segments))
-        self.assertIn((points["ZN"], points["ZO"]), cl2.inner_segments)
-        self.assertIn((points["ZO"], points["ZP"]), cl2.inner_segments)
+        self.assertTrue(any(start == points["S"] for start, _ in inner_segments))
+        self.assertTrue(any(end == points["T"] for _, end in inner_segments))
+        self.assertTrue(any(start == points["V"] for start, _ in target_segments))
+        self.assertTrue(any(end == points["W"] for _, end in target_segments))
+        self.assertIn((points["ZN"], points["ZO"]), inner_segments)
+        self.assertIn((points["ZO"], points["ZP"]), inner_segments)
         inner_curve = generator.secondary_curve_segments(
             cfg,
             dimensions,
@@ -579,8 +610,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
     def test_cl2_paired_vias_use_annular_clearance_spacing(self) -> None:
         cfg = generator.build_config()
         primary = generator.build_primary_geometry(cfg)
-        cl2 = generator.build_cl2_geometry(cfg)
-        assert cl2 is not None
+        dimensions = generator.calculate_dimensions(cfg)
+        points = generator.build_cl2_point_map(cfg, dimensions)
         expected_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
         pitch = generator.trace_pitch(cfg)
         expected_primary_clearance = generator.osc1_via_trace_clearance(cfg)
@@ -588,24 +619,24 @@ class LinearSensorGeneratorTests(unittest.TestCase):
 
         for first, second in (("E", "Y"), ("H", "ZB"), ("O", "ZI"), ("R", "ZL")):
             self.assertAlmostEqual(
-                generator.distance(cl2.points[first], cl2.points[second]),
+                generator.distance(points[first], points[second]),
                 expected_spacing,
             )
-        self.assertEqual(cl2.points["ZC"][1], cl2.points["G"][1])
-        self.assertAlmostEqual(cl2.points["ZC"][1] - cl2.points["ZA"][1], pitch)
-        self.assertAlmostEqual(cl2.points["ZG"][1] - cl2.points["J"][1], pitch)
-        self.assertAlmostEqual(cl2.points["ZG"][1], -(cl2.points["J"][1]))
+        self.assertEqual(points["ZC"][1], points["G"][1])
+        self.assertAlmostEqual(points["ZC"][1] - points["ZA"][1], pitch)
+        self.assertAlmostEqual(points["ZG"][1] - points["J"][1], pitch)
+        self.assertAlmostEqual(points["ZG"][1], -(points["J"][1]))
         self.assertAlmostEqual(
-            cl2.points["H"][1],
+            points["H"][1],
             inner_primary_y - expected_primary_clearance,
         )
         self.assertAlmostEqual(
-            cl2.points["E"][1],
+            points["E"][1],
             -(inner_primary_y - expected_primary_clearance),
         )
         for via_label in ("E", "Y", "H", "ZB", "O", "ZI", "R", "ZL"):
             nearest_primary_trace = min(
-                generator.point_to_segment_distance(cl2.points[via_label], segment)
+                generator.point_to_segment_distance(points[via_label], segment)
                 for coil in primary.coils
                 for segment in coil.body_segments
             )
