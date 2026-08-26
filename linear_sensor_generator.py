@@ -36,7 +36,7 @@ PROPERTIES = {
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
-    "number_of_secondary_turns": 3,     # valid range: 1..5
+    "number_of_secondary_turns": 4,     # valid range: 1..5
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Trace & Via constraints 
@@ -70,7 +70,7 @@ PROPERTIES = {
     "allow_invalid_geometry": True,  # when True, skip copper/via validation checks so invalid footprints can still be rendered for visual debugging
 
 
-    "secondary_curve_samples_per_cycle": 512,
+    "secondary_curve_samples_per_cycle": 256,
     "secondary_jump_runup_via_multiplier": 3.0,
     "secondary_jump_detour_via_multiplier": 0.35,
     # Recommended CL1 transition-column range: 0.02 to 0.05.
@@ -1870,6 +1870,27 @@ def cl1_right_end_columns(cfg: dict) -> tuple[float, float]:
     return outer_turn_x, next_turn_x
 
 
+def cl1_crossover_candidate_cl2_segments(
+    cfg: dict,
+    cl2_geometry: SecondaryCoil,
+    turn_x: float,
+    required_clearance: float,
+) -> tuple[Segment, ...]:
+    """Return CL2 segments whose x-span could violate the crossover-via clearance."""
+    cl2_segments = cl2_geometry.target_segments + cl2_geometry.inner_segments
+    if fanout_direction(cfg) > 0:
+        cl2_segments = mirror_segments_horizontally(cl2_segments)
+
+    minimum_x = turn_x - required_clearance - GEOMETRY_TOLERANCE_MM
+    maximum_x = turn_x + required_clearance + GEOMETRY_TOLERANCE_MM
+    return tuple(
+        segment
+        for segment in cl2_segments
+        if min(segment[0][0], segment[1][0]) <= maximum_x
+        and max(segment[0][0], segment[1][0]) >= minimum_x
+    )
+
+
 def cl1_crossover_turn_half_height(
     cfg: dict,
     dimensions: SensorDimensions,
@@ -1885,13 +1906,11 @@ def cl1_crossover_turn_half_height(
         return minimum_half_height
 
     required_clearance = osc1_via_trace_clearance(cfg)
-    if fanout_direction(cfg) > 0:
-        cl2_segments = tuple(
-            ((-start[0], start[1]), (-end[0], end[1]))
-            for start, end in cl2_geometry.target_segments + cl2_geometry.inner_segments
-        )
-    else:
-        cl2_segments = cl2_geometry.target_segments + cl2_geometry.inner_segments
+    cl2_segments = cl1_crossover_candidate_cl2_segments(
+        cfg, cl2_geometry, turn_x, required_clearance
+    )
+    if not cl2_segments:
+        return minimum_half_height
     search_step = 0.001
     candidate = minimum_half_height
     while candidate <= maximum_half_height + GEOMETRY_TOLERANCE_MM:

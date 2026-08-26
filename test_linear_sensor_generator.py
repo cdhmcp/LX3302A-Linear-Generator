@@ -428,6 +428,44 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                     (dimensions.secondary_width_mm / 2.0) + 0.01,
                 )
 
+    def test_cl1_crossover_candidate_cl2_segments_only_include_local_x_overlaps(self) -> None:
+        for fanout_side in ("left", "right"):
+            with self.subTest(fanout_side=fanout_side):
+                cfg = generator.build_config(
+                    {
+                        "number_of_secondary_turns": 5,
+                        "fanout_side": fanout_side,
+                        "secondary_curve_samples_per_cycle": 64,
+                    }
+                )
+                primary = generator.build_primary_geometry(cfg)
+                cl2 = generator.build_cl2_geometry(cfg, primary)
+                assert cl2 is not None
+
+                clearance = generator.osc1_via_trace_clearance(cfg)
+                all_segments = cl2.target_segments + cl2.inner_segments
+                if generator.fanout_direction(cfg) > 0:
+                    all_segments = generator.mirror_segments_horizontally(all_segments)
+
+                for turn_index in range(cfg["number_of_secondary_turns"]):
+                    turn_x = generator.cl1_right_end_column(cfg, turn_index)
+                    minimum_x = turn_x - clearance - generator.GEOMETRY_TOLERANCE_MM
+                    maximum_x = turn_x + clearance + generator.GEOMETRY_TOLERANCE_MM
+                    expected = tuple(
+                        segment
+                        for segment in all_segments
+                        if min(segment[0][0], segment[1][0]) <= maximum_x
+                        and max(segment[0][0], segment[1][0]) >= minimum_x
+                    )
+
+                    actual = generator.cl1_crossover_candidate_cl2_segments(
+                        cfg, cl2, turn_x, clearance
+                    )
+
+                    self.assertEqual(actual, expected)
+                    self.assertGreater(len(actual), 0)
+                    self.assertLess(len(actual), len(all_segments))
+
     def test_multiturn_cl1_left_transition_handoff_stays_off_inner_next_start(self) -> None:
         for turns in (3, 5):
             with self.subTest(turns=turns):
