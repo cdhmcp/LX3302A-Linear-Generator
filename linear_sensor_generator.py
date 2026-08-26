@@ -10,6 +10,8 @@ below for reference and regression checks.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import itertools
 import math
 from pathlib import Path
 
@@ -175,6 +177,21 @@ class CL1LayoutPlan:
     inner_reverse_paths: tuple[tuple[Segment, ...], ...]
     right_via_labels: tuple[str, ...]
     left_via_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CL2RightTurnaroundPlan:
+    """Packed right-end jog-via handoff geometry for the generalized CL2 path."""
+
+    via_points: dict[str, Point]
+    via_labels: tuple[str, ...]
+    target_segments: tuple[Segment, ...]
+    inner_segments: tuple[Segment, ...]
+    column_count: int
+    rightmost_u: float
+    assignment: tuple[int, ...]
+    minimum_adjacent_spacing: float
+    score: float
 
 
 def build_config(overrides: dict | None = None) -> dict:
@@ -1337,9 +1354,411 @@ def validate_cl2_clearance(
             )
 
 
+@lru_cache(maxsize=None)
+def cl2_right_turnaround_assignment_candidates(
+    turn_count: int,
+    column_count: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Return every surjective turn-to-column assignment for the CL2 right-end packer."""
+    if column_count < 1 or column_count > turn_count:
+        return ()
+    return tuple(
+        assignment
+        for assignment in itertools.product(range(column_count), repeat=turn_count)
+        if len(set(assignment)) == column_count
+    )
+
+
+def cl2_right_turnaround_segments(
+    points: dict[str, Point],
+    turn_count: int,
+) -> tuple[tuple[str, ...], tuple[Segment, ...], tuple[Segment, ...]]:
+    """Return the generated CL2 right-end jog-via turnaround segments."""
+    via_labels = tuple(
+        f"TURN{turn_number}_RIGHT_DETOUR_VIA"
+        for turn_number in range(1, turn_count + 1)
+    )
+    target_segments = tuple(
+        (points[f"TURN{turn_number}_RIGHT_END"], points[f"TURN{turn_number}_RIGHT_DETOUR_VIA"])
+        for turn_number in range(1, turn_count + 1)
+    )
+    inner_segments = tuple(
+        (points[f"TURN{turn_number}_RIGHT_DETOUR_VIA"], points[f"TURN{turn_number}_RIGHT_RUNUP"])
+        for turn_number in range(1, turn_count + 1)
+    )
+    return via_labels, target_segments, inner_segments
+
+
+def cl2_fixed_right_transition_geometry(
+    points: dict[str, Point],
+    turn_count: int,
+) -> tuple[tuple[str, ...], tuple[Segment, ...], tuple[Segment, ...]]:
+    """Return the unchanged right-side quarter-span CL2 transition geometry."""
+    via_labels: list[str] = []
+    target_segments: list[Segment] = []
+    inner_segments: list[Segment] = []
+    for turn_number in range(1, turn_count + 1):
+        right_inner = f"TURN{turn_number}_RIGHT_INNER"
+        right_lower_via = f"TURN{turn_number}_RIGHT_LOWER_VIA"
+        right_outer = f"TURN{turn_number}_RIGHT_OUTER"
+        reverse_right_outer = f"TURN{turn_number}_REV_RIGHT_OUTER"
+        reverse_right_upper_via = f"TURN{turn_number}_REV_RIGHT_UPPER_VIA"
+        reverse_target_start = f"TURN{turn_number}_REV_RIGHT_INNER"
+        via_labels.extend((right_lower_via, reverse_right_upper_via))
+        inner_segments.extend(
+            (
+                (points[right_inner], points[right_lower_via]),
+                (points[reverse_right_outer], points[reverse_right_upper_via]),
+            )
+        )
+        target_segments.extend(
+            (
+                (points[right_lower_via], points[right_outer]),
+                (points[reverse_right_upper_via], points[reverse_target_start]),
+            )
+        )
+    return tuple(via_labels), tuple(target_segments), tuple(inner_segments)
+
+
+def cl2_turnaround_parallel_spacing_requirement(
+    cfg: dict,
+    first: Segment,
+    second: Segment,
+) -> float:
+    """Cap jog spacing by the tighter preserved anchor separation for the two turns."""
+    return min(
+        trace_pitch(cfg),
+        distance(first[0], second[0]),
+        distance(first[1], second[1]),
+    )
+
+
+def cl2_right_turnaround_minimum_adjacent_spacing(
+    target_segments: tuple[Segment, ...],
+    inner_segments: tuple[Segment, ...],
+) -> float:
+    """Return the tightest adjacent jog spacing across the packed CL2 turnaround."""
+    adjacent_spacings = [
+        segment_to_segment_distance(first, second)
+        for group in (target_segments, inner_segments)
+        for first, second in zip(group, group[1:])
+    ]
+    return min(adjacent_spacings, default=float("inf"))
+
+
+def cl2_right_turnaround_clearance_violations_from_segments(
+    cfg: dict,
+    points: dict[str, Point],
+    primary_segments: tuple[Segment, ...],
+    via_labels: tuple[str, ...],
+    target_segments: tuple[Segment, ...],
+    inner_segments: tuple[Segment, ...],
+    fixed_via_labels: tuple[str, ...],
+    fixed_target_segments: tuple[Segment, ...],
+    fixed_inner_segments: tuple[Segment, ...],
+) -> tuple[str, ...]:
+    """Validate the hard-clearance rules for the packed CL2 right-end turnaround."""
+    minimum_pad_distance = secondary_via_spacing(cfg)
+    minimum_trace_distance = osc1_via_trace_clearance(cfg)
+    pitch = trace_pitch(cfg)
+    violations: list[str] = []
+
+    for first_index, first in enumerate(via_labels):
+        for second in via_labels[first_index + 1:]:
+            if (
+                distance(points[first], points[second])
+                + GEOMETRY_TOLERANCE_MM
+                < minimum_pad_distance
+            ):
+                violations.append(
+                    f"CL2 turnaround vias {first}/{second} violate plated via clearance."
+                )
+
+    for via_label in via_labels:
+        nearest_primary_trace = min(
+            point_to_segment_distance(points[via_label], segment)
+            for segment in primary_segments
+        )
+        if nearest_primary_trace + GEOMETRY_TOLERANCE_MM < minimum_trace_distance:
+            violations.append(
+                f"CL2 via {via_label} violates clearance to the primary winding."
+            )
+
+    for layer_name, jog_segments in (("target", target_segments), ("inner", inner_segments)):
+        for turn_index, jog in enumerate(jog_segments, start=1):
+            nearest_primary_trace = min(
+                segment_to_segment_distance(jog, segment)
+                for segment in primary_segments
+            )
+            if nearest_primary_trace + GEOMETRY_TOLERANCE_MM < minimum_trace_distance:
+                violations.append(
+                    f"CL2 {layer_name} jog for turn {turn_index} violates clearance to the primary winding."
+                )
+
+    for via_label in via_labels:
+        if any(
+            distance(points[via_label], points[fixed_label]) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance
+            for fixed_label in fixed_via_labels
+        ):
+            violations.append(
+                f"CL2 via {via_label} crowds the fixed right-side quarter-span transition vias."
+            )
+        if any(
+            point_to_segment_distance(points[via_label], segment) + GEOMETRY_TOLERANCE_MM
+            < minimum_trace_distance
+            for segment in fixed_target_segments + fixed_inner_segments
+        ):
+            violations.append(
+                f"CL2 via {via_label} crowds the fixed right-side quarter-span transition copper."
+            )
+
+    for turn_index, jog in enumerate(target_segments, start=1):
+        if any(
+            segment_to_segment_distance(jog, fixed_segment) + GEOMETRY_TOLERANCE_MM < pitch
+            for fixed_segment in fixed_target_segments
+        ):
+            violations.append(
+                f"CL2 target jog for turn {turn_index} crowds the fixed right-side target transition."
+            )
+
+    for turn_index, jog in enumerate(inner_segments, start=1):
+        if any(
+            segment_to_segment_distance(jog, fixed_segment) + GEOMETRY_TOLERANCE_MM < pitch
+            for fixed_segment in fixed_inner_segments
+        ):
+            violations.append(
+                f"CL2 inner jog for turn {turn_index} crowds the fixed right-side inner transition."
+            )
+
+    return tuple(violations)
+
+
+def cl2_right_turnaround_clearance_violations(
+    cfg: dict,
+    points: dict[str, Point],
+    primary_segments: tuple[Segment, ...],
+) -> tuple[str, ...]:
+    """Return any clearance failures for the packed CL2 right-end turnaround."""
+    turn_count = cfg["number_of_secondary_turns"]
+    via_labels, target_segments, inner_segments = cl2_right_turnaround_segments(
+        points, turn_count
+    )
+    fixed_via_labels, fixed_target_segments, fixed_inner_segments = (
+        cl2_fixed_right_transition_geometry(points, turn_count)
+    )
+    return cl2_right_turnaround_clearance_violations_from_segments(
+        cfg,
+        points,
+        primary_segments,
+        via_labels,
+        target_segments,
+        inner_segments,
+        fixed_via_labels,
+        fixed_target_segments,
+        fixed_inner_segments,
+    )
+
+
+def cl2_turnaround_rightmost_u_values(
+    max_rightmost_u: float,
+    min_rightmost_u: float,
+    step: float = 0.001,
+) -> tuple[float, ...]:
+    """Return descending sensor-end coordinates for the outermost turnaround column."""
+    if max_rightmost_u + GEOMETRY_TOLERANCE_MM < min_rightmost_u:
+        return ()
+    candidates = [max_rightmost_u]
+    current = max_rightmost_u
+    while current - step > min_rightmost_u + GEOMETRY_TOLERANCE_MM:
+        current -= step
+        candidates.append(current)
+    if candidates[-1] > min_rightmost_u + GEOMETRY_TOLERANCE_MM:
+        candidates.append(min_rightmost_u)
+    else:
+        candidates[-1] = min_rightmost_u
+    return tuple(candidates)
+
+
+def build_cl2_right_turnaround_plan(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    points: dict[str, Point],
+    primary_segments: tuple[Segment, ...],
+    column_count: int | None = None,
+) -> CL2RightTurnaroundPlan:
+    """Pack the CL2 right-end turnaround vias and jogs while preserving both curve anchors."""
+    turn_count = cfg["number_of_secondary_turns"]
+    if column_count is not None and not 1 <= column_count <= turn_count:
+        raise ValueError("column_count must be between 1 and number_of_secondary_turns.")
+
+    half_span = secondary_stroke_length(cfg) / 2.0
+    via_spacing = secondary_via_spacing(cfg)
+    sensor_end_direction = -fanout_direction(cfg)
+    rightmost_clear_u = (
+        (dimensions.primary_length_mm / 2.0)
+        - ((cfg["number_of_primary_turns"] - 1) * trace_pitch(cfg))
+        - osc1_via_trace_clearance(cfg)
+    )
+    fixed_via_labels, fixed_target_segments, fixed_inner_segments = (
+        cl2_fixed_right_transition_geometry(points, turn_count)
+    )
+
+    if column_count is None:
+        column_counts = range(1, turn_count + 1)
+    else:
+        column_counts = (column_count,)
+
+    best_fallback_plan: CL2RightTurnaroundPlan | None = None
+    best_fallback_rank: tuple[int, int, float, float, float, tuple[int, ...]] | None = None
+
+    for packed_columns in column_counts:
+        assignments = cl2_right_turnaround_assignment_candidates(turn_count, packed_columns)
+        if not assignments:
+            continue
+        minimum_rightmost_u = half_span
+        if rightmost_clear_u + GEOMETRY_TOLERANCE_MM < minimum_rightmost_u:
+            if not should_skip_geometry_validation(cfg):
+                continue
+            rightmost_candidates = (minimum_rightmost_u,)
+        else:
+            rightmost_candidates = cl2_turnaround_rightmost_u_values(
+                rightmost_clear_u,
+                minimum_rightmost_u,
+            )
+
+        for rightmost_u in rightmost_candidates:
+            best_valid_plan: CL2RightTurnaroundPlan | None = None
+            best_invalid_plan: CL2RightTurnaroundPlan | None = None
+            best_invalid_rank_for_u: tuple[int, float, float, tuple[int, ...]] | None = None
+
+            for assignment in assignments:
+                column_turns = {column: [] for column in range(packed_columns)}
+                for turn_index, assigned_column in enumerate(assignment):
+                    column_turns[assigned_column].append(turn_index)
+
+                via_points: dict[str, Point] = {}
+                for packed_column in range(packed_columns):
+                    column_x = sensor_end_direction * (
+                        rightmost_u - (packed_column * via_spacing)
+                    )
+                    column_y_positions = centered_positions(
+                        len(column_turns[packed_column]),
+                        via_spacing,
+                    )
+                    for turn_index, via_y in zip(
+                        column_turns[packed_column],
+                        column_y_positions,
+                    ):
+                        via_points[f"TURN{turn_index + 1}_RIGHT_DETOUR_VIA"] = (
+                            column_x,
+                            via_y,
+                        )
+
+                candidate_points = {**points, **via_points}
+                via_labels, target_segments, inner_segments = cl2_right_turnaround_segments(
+                    candidate_points,
+                    turn_count,
+                )
+                candidate_plan = CL2RightTurnaroundPlan(
+                    via_points=via_points,
+                    via_labels=via_labels,
+                    target_segments=target_segments,
+                    inner_segments=inner_segments,
+                    column_count=packed_columns,
+                    rightmost_u=rightmost_u,
+                    assignment=assignment,
+                    minimum_adjacent_spacing=cl2_right_turnaround_minimum_adjacent_spacing(
+                        target_segments,
+                        inner_segments,
+                    ),
+                    score=sum(
+                        distance(*segment)
+                        for segment in target_segments + inner_segments
+                    ),
+                )
+                violations = cl2_right_turnaround_clearance_violations_from_segments(
+                    cfg,
+                    candidate_points,
+                    primary_segments,
+                    via_labels,
+                    target_segments,
+                    inner_segments,
+                    fixed_via_labels,
+                    fixed_target_segments,
+                    fixed_inner_segments,
+                )
+                if not violations:
+                    # Preserved RIGHT_END/RIGHT_RUNUP anchors can force adjacent straight
+                    # fans below the nominal trace pitch for higher turn counts, so we
+                    # optimize for the widest adjacent jog spacing here and reserve
+                    # hard failures for actual copper/via clearance violations.
+                    if (
+                        best_valid_plan is None
+                        or candidate_plan.minimum_adjacent_spacing
+                        > best_valid_plan.minimum_adjacent_spacing + GEOMETRY_TOLERANCE_MM
+                        or (
+                            math.isclose(
+                                candidate_plan.minimum_adjacent_spacing,
+                                best_valid_plan.minimum_adjacent_spacing,
+                                abs_tol=GEOMETRY_TOLERANCE_MM,
+                            )
+                            and candidate_plan.score < best_valid_plan.score
+                        )
+                        or (
+                            math.isclose(candidate_plan.score, best_valid_plan.score)
+                            and candidate_plan.assignment < best_valid_plan.assignment
+                        )
+                    ):
+                        best_valid_plan = candidate_plan
+                elif should_skip_geometry_validation(cfg):
+                    invalid_rank_for_u = (
+                        len(violations),
+                        -candidate_plan.minimum_adjacent_spacing,
+                        candidate_plan.score,
+                        candidate_plan.assignment,
+                    )
+                    if (
+                        best_invalid_plan is None
+                        or invalid_rank_for_u < best_invalid_rank_for_u
+                    ):
+                        best_invalid_plan = candidate_plan
+                        best_invalid_rank_for_u = invalid_rank_for_u
+
+            if best_valid_plan is not None:
+                return best_valid_plan
+
+            if best_invalid_plan is not None:
+                fallback_rank = (
+                    best_invalid_rank_for_u[0],
+                    packed_columns,
+                    -rightmost_u,
+                    best_invalid_rank_for_u[1],
+                    best_invalid_rank_for_u[2],
+                    best_invalid_rank_for_u[3],
+                )
+                if (
+                    best_fallback_plan is None
+                    or fallback_rank < best_fallback_rank
+                ):
+                    best_fallback_plan = best_invalid_plan
+                    best_fallback_rank = fallback_rank
+
+    if best_fallback_plan is not None:
+        return best_fallback_plan
+
+    if rightmost_clear_u + GEOMETRY_TOLERANCE_MM < half_span:
+        raise ValueError(
+            "CL2 right-end turnaround has no room for an outward via column inside the primary envelope."
+        )
+    raise ValueError(
+        "CL2 right-end turnaround could not be packed without violating clearance."
+    )
+
+
 def build_multiturn_cl2_layout(
     cfg: dict,
     dimensions: SensorDimensions,
+    primary_geometry: PrimaryGeometry | None = None,
 ) -> SecondaryLayoutPlan:
     """Build CL2 for all valid turn counts while keeping the legacy outer envelope."""
     half_span = secondary_stroke_length(cfg) / 2.0
@@ -1460,7 +1879,6 @@ def build_multiturn_cl2_layout(
             ),
             right_column_x,
         )
-        right_runup_x = half_span - runup - (turn_index * secondary_via_spacing(cfg))
         points[str(labels["right_end"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -1472,19 +1890,9 @@ def build_multiturn_cl2_layout(
             ),
             half_span,
         )
-        points[str(labels["right_runup"])] = secondary_rail_point(
-            cfg,
-            dimensions,
-            right_runup_x,
-            1.0,
-            outer_offset,
-            amplitude_override=amplitude_override,
-        )
-        detour_direction = -1.0 if outer_offset < 0.0 else 1.0
-        points[str(labels["right_detour"])] = (
-            points[str(labels["right_runup"])][0],
-            points[str(labels["right_runup"])][1] + (detour_direction * detour),
-        )
+        # Both CL2 sinusoidal sections now share the same curve-side anchor before
+        # the packed jog/via turnaround.
+        points[str(labels["right_runup"])] = points[str(labels["right_end"])]
         points[str(labels["reverse_right_outer"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -1576,6 +1984,20 @@ def build_multiturn_cl2_layout(
     if fanout_direction(cfg) > 0:
         points = mirror_points_horizontally(points)
 
+    primary_geometry = primary_geometry or build_primary_geometry(cfg)
+    primary_segments = tuple(
+        segment
+        for coil in primary_geometry.coils
+        for segment in coil.body_segments
+    )
+    turnaround_plan = build_cl2_right_turnaround_plan(
+        cfg,
+        dimensions,
+        points,
+        primary_segments,
+    )
+    points = {**points, **turnaround_plan.via_points}
+
     target_segments: list[Segment] = [
         (points["A"], points["B"]),
         (points["B"], points["TURN1_START"]),
@@ -1653,19 +2075,7 @@ def build_multiturn_cl2_layout(
         target_forward_paths.append(target_first + target_second)
         inner_forward_paths.append(inner_forward)
 
-        right_turn = secondary_curve_segments(
-            cfg,
-            dimensions,
-            points[right_end],
-            points[right_runup],
-            1.0,
-            outer_offset,
-            station_start_x=points[right_end][0],
-            station_end_x=points[right_runup][0],
-            amplitude_override=amplitude_override,
-        )
-        target_segments.extend(right_turn)
-        target_segments.append((points[right_runup], points[right_detour]))
+        target_segments.append((points[right_end], points[right_detour]))
         inner_segments.append((points[right_detour], points[right_runup]))
 
         inner_reverse_outer = secondary_curve_segments(
@@ -1791,6 +2201,11 @@ def validate_multiturn_cl2_clearance(
     layout: SecondaryLayoutPlan,
 ) -> None:
     """Validate the generated CL2 spiral for the generalized receiver path."""
+    primary_segments = tuple(
+        segment
+        for coil in primary_geometry.coils
+        for segment in coil.body_segments
+    )
     minimum_pad_distance = secondary_via_spacing(cfg)
     for first_index, first in enumerate(layout.via_labels):
         for second in layout.via_labels[first_index + 1:]:
@@ -1819,8 +2234,7 @@ def validate_multiturn_cl2_clearance(
             continue
         nearest_primary_trace = min(
             point_to_segment_distance(layout.points[via_label], segment)
-            for coil in primary_geometry.coils
-            for segment in coil.body_segments
+            for segment in primary_segments
         )
         if nearest_primary_trace + GEOMETRY_TOLERANCE_MM < minimum_primary_trace_distance:
             raise ValueError(
@@ -1838,6 +2252,14 @@ def validate_multiturn_cl2_clearance(
                     f"minimum centerline distance is {actual_spacing:.6f} mm, "
                     f"required pitch is {pitch:.6f} mm."
                 )
+
+    turnaround_violations = cl2_right_turnaround_clearance_violations(
+        cfg,
+        layout.points,
+        primary_segments,
+    )
+    if turnaround_violations:
+        raise ValueError(turnaround_violations[0])
 
 
 CL2_TWO_TURN_LEGACY_VIA_LABELS = (
@@ -1915,7 +2337,7 @@ def build_cl2_geometry(
     dimensions = calculate_dimensions(cfg)
     validate_config(cfg, dimensions)
     primary_geometry = primary_geometry or build_primary_geometry(cfg)
-    layout = build_multiturn_cl2_layout(cfg, dimensions)
+    layout = build_multiturn_cl2_layout(cfg, dimensions, primary_geometry)
     if not should_skip_geometry_validation(cfg):
         validate_multiturn_cl2_clearance(cfg, dimensions, primary_geometry, layout)
     points = layout.points
