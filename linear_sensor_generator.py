@@ -40,7 +40,7 @@ PROPERTIES = {
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
-    "number_of_secondary_turns": 2,     # valid range: 1..5
+    "number_of_secondary_turns": 4,     # valid range: 1..5
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Trace & Via constraints 
@@ -1594,6 +1594,9 @@ def build_cl2_right_turnaround_plan(
     half_span = secondary_stroke_length(cfg) / 2.0
     via_spacing = secondary_via_spacing(cfg)
     sensor_end_direction = -fanout_direction(cfg)
+    # Keep the turnaround vias one receiver-via pitch away from the shared end
+    # anchor so they do not electrically short adjacent turns together.
+    desired_rightmost_u = half_span + via_spacing
     rightmost_clear_u = (
         (dimensions.primary_length_mm / 2.0)
         - ((cfg["number_of_primary_turns"] - 1) * trace_pitch(cfg))
@@ -1608,6 +1611,13 @@ def build_cl2_right_turnaround_plan(
     else:
         column_counts = (column_count,)
 
+    if rightmost_clear_u + GEOMETRY_TOLERANCE_MM < desired_rightmost_u:
+        if not should_skip_geometry_validation(cfg):
+            raise ValueError(
+                "CL2 right-end turnaround column one via-spacing beyond TURNn_RIGHT_END "
+                "does not fit inside the primary envelope."
+            )
+
     best_fallback_plan: CL2RightTurnaroundPlan | None = None
     best_fallback_rank: tuple[int, int, float, float, float, tuple[int, ...]] | None = None
 
@@ -1615,16 +1625,7 @@ def build_cl2_right_turnaround_plan(
         assignments = cl2_right_turnaround_assignment_candidates(turn_count, packed_columns)
         if not assignments:
             continue
-        minimum_rightmost_u = half_span
-        if rightmost_clear_u + GEOMETRY_TOLERANCE_MM < minimum_rightmost_u:
-            if not should_skip_geometry_validation(cfg):
-                continue
-            rightmost_candidates = (minimum_rightmost_u,)
-        else:
-            rightmost_candidates = cl2_turnaround_rightmost_u_values(
-                rightmost_clear_u,
-                minimum_rightmost_u,
-            )
+        rightmost_candidates = (desired_rightmost_u,)
 
         for rightmost_u in rightmost_candidates:
             best_valid_plan: CL2RightTurnaroundPlan | None = None
@@ -1751,10 +1752,6 @@ def build_cl2_right_turnaround_plan(
     if best_fallback_plan is not None:
         return best_fallback_plan
 
-    if rightmost_clear_u + GEOMETRY_TOLERANCE_MM < half_span:
-        raise ValueError(
-            "CL2 right-end turnaround has no room for an outward via column inside the primary envelope."
-        )
     raise ValueError(
         "CL2 right-end turnaround could not be packed without violating clearance."
     )

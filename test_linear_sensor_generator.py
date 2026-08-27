@@ -502,13 +502,9 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                     for turn_number in range(1, turns + 1)
                 ]
                 unique_x = {round(point[0], 6) for point in detours}
-                rightmost_clear_u = (
-                    (dimensions.primary_length_mm / 2.0)
-                    - (
-                        (cfg["number_of_primary_turns"] - 1)
-                        * generator.trace_pitch(cfg)
-                    )
-                    - generator.osc1_via_trace_clearance(cfg)
+                expected_rightmost_u = (
+                    (generator.secondary_stroke_length(cfg) / 2.0)
+                    + generator.secondary_via_spacing(cfg)
                 )
                 expected_ys = generator.centered_positions(
                     turns,
@@ -518,7 +514,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 self.assertEqual(len(unique_x), 1)
                 self.assertAlmostEqual(
                     (-generator.fanout_direction(cfg)) * detours[0][0],
-                    rightmost_clear_u,
+                    expected_rightmost_u,
                 )
                 for detour, expected_y in zip(detours, expected_ys):
                     self.assertAlmostEqual(detour[1], expected_y)
