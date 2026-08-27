@@ -524,6 +524,135 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                         generator.secondary_via_spacing(cfg),
                     )
 
+    def test_multiturn_cl2_left_end_turnaround_uses_shared_left_edge_anchors(self) -> None:
+        for turns in range(1, 6):
+            with self.subTest(turns=turns):
+                cfg = generator.build_config(
+                    {"number_of_secondary_turns": turns, "allow_invalid_geometry": True}
+                )
+                dimensions = generator.calculate_dimensions(cfg)
+                primary = generator.build_primary_geometry(cfg)
+                cl2 = generator.build_cl2_geometry(cfg, primary)
+                assert cl2 is not None
+
+                half_span = generator.secondary_stroke_length(cfg) / 2.0
+                outer_offsets = generator.secondary_turn_offsets(cfg)
+                amplitude_override = generator.secondary_wave_amplitude_for_offsets(
+                    dimensions,
+                    outer_offsets,
+                )
+
+                for turn_index, outer_offset in enumerate(outer_offsets):
+                    turn_number = turn_index + 1
+                    expected_start = generator.point_at_station_x(
+                        generator.secondary_rail_point(
+                            cfg,
+                            dimensions,
+                            -half_span,
+                            -1.0,
+                            outer_offset,
+                            amplitude_override=amplitude_override,
+                        ),
+                        -half_span,
+                    )
+                    expected_left_end = generator.point_at_station_x(
+                        generator.secondary_rail_point(
+                            cfg,
+                            dimensions,
+                            -half_span,
+                            1.0,
+                            outer_offset,
+                            amplitude_override=amplitude_override,
+                        ),
+                        -half_span,
+                    )
+
+                    self.assertEqual(cl2.points[f"TURN{turn_number}_START"], expected_start)
+                    self.assertEqual(cl2.points[f"TURN{turn_number}_LEFT_END"], expected_left_end)
+
+                    if turn_number < turns:
+                        self.assertIn(
+                            (
+                                cl2.points[f"TURN{turn_number}_LEFT_END"],
+                                cl2.points[f"TURN{turn_number}_LEFT_DETOUR_VIA"],
+                            ),
+                            cl2.inner_segments,
+                        )
+                        self.assertIn(
+                            (
+                                cl2.points[f"TURN{turn_number}_LEFT_DETOUR_VIA"],
+                                cl2.points[f"TURN{turn_number + 1}_START"],
+                            ),
+                            cl2.target_segments,
+                        )
+                        self.assertTrue(
+                            any(
+                                segment[1] == cl2.points[f"TURN{turn_number}_LEFT_END"]
+                                and segment[0] != cl2.points[f"TURN{turn_number}_LEFT_DETOUR_VIA"]
+                                for segment in cl2.inner_segments
+                            )
+                        )
+
+                self.assertEqual(
+                    cl2.points[f"TURN{turns}_RETURN_START"],
+                    cl2.points[f"TURN{turns}_LEFT_END"],
+                )
+                self.assertEqual(
+                    len(
+                        [
+                            label
+                            for label in (
+                                f"TURN{turn_number}_LEFT_DETOUR_VIA"
+                                for turn_number in range(1, turns)
+                            )
+                            if label in cl2.points
+                        ]
+                    ),
+                    max(turns - 1, 0),
+                )
+
+    def test_multiturn_cl2_left_end_turnaround_packs_one_leftmost_centered_column(self) -> None:
+        for turns in range(1, 6):
+            with self.subTest(turns=turns):
+                cfg = generator.build_config(
+                    {"number_of_secondary_turns": turns, "allow_invalid_geometry": True}
+                )
+                primary = generator.build_primary_geometry(cfg)
+                cl2 = generator.build_cl2_geometry(cfg, primary)
+                assert cl2 is not None
+
+                detours = [
+                    cl2.points[f"TURN{turn_number}_LEFT_DETOUR_VIA"]
+                    for turn_number in range(1, turns)
+                ]
+
+                if turns == 1:
+                    self.assertEqual(detours, [])
+                    continue
+
+                unique_x = {round(point[0], 6) for point in detours}
+                expected_leftmost_u = (
+                    (generator.secondary_stroke_length(cfg) / 2.0)
+                    + generator.secondary_via_spacing(cfg)
+                )
+                expected_ys = generator.centered_positions(
+                    turns - 1,
+                    generator.secondary_via_spacing(cfg),
+                )
+
+                self.assertEqual(len(unique_x), 1)
+                self.assertAlmostEqual(
+                    generator.fanout_direction(cfg) * detours[0][0],
+                    expected_leftmost_u,
+                )
+                for detour, expected_y in zip(detours, expected_ys):
+                    self.assertAlmostEqual(detour[1], expected_y)
+                for first, second in zip(detours, detours[1:]):
+                    self.assertAlmostEqual(
+                        generator.distance(first, second),
+                        generator.secondary_via_spacing(cfg),
+                    )
+
     def test_multiturn_cl1_columns_center_on_midpoint_and_step_inward(self) -> None:
         for turns in (1, 3, 4, 5):
             with self.subTest(turns=turns):
@@ -674,6 +803,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         for name in (
             "TURN1_START",
             "TURN1_LEFT_OUTER",
+            "TURN2_LEFT_DETOUR_VIA",
+            "TURN3_LEFT_END",
             "TURN2_RIGHT_OUTER",
             "TURN4_RIGHT_DETOUR_VIA",
             "TURN4_RETURN_START",

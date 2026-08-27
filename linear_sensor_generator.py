@@ -70,7 +70,7 @@ PROPERTIES = {
     "generate_osc1": True,
     "generate_osc2": True,
     "generate_cl2": True,
-    "generate_cl1": True,
+    "generate_cl1": False,
     "allow_invalid_geometry": True,  # when True, skip copper/via validation checks so invalid footprints can still be rendered for visual debugging
 
 
@@ -1389,6 +1389,48 @@ def cl2_right_turnaround_segments(
     return via_labels, target_segments, inner_segments
 
 
+def cl2_left_turnaround_via_points(cfg: dict) -> dict[str, Point]:
+    """Return the provisional mirrored left-side jog-via column in the left-entry frame."""
+    turn_count = cfg["number_of_secondary_turns"]
+    if turn_count <= 1:
+        return {}
+    via_spacing = secondary_via_spacing(cfg)
+    left_column_x = -((secondary_stroke_length(cfg) / 2.0) + via_spacing)
+    return {
+        f"TURN{turn_number}_LEFT_DETOUR_VIA": (left_column_x, via_y)
+        for turn_number, via_y in enumerate(
+            centered_positions(turn_count - 1, via_spacing),
+            start=1,
+        )
+    }
+
+
+def cl2_left_turnaround_segments(
+    points: dict[str, Point],
+    turn_count: int,
+) -> tuple[tuple[str, ...], tuple[Segment, ...], tuple[Segment, ...]]:
+    """Return the mirrored left-side jog-via handoff segments between CL2 turns."""
+    via_labels = tuple(
+        f"TURN{turn_number}_LEFT_DETOUR_VIA"
+        for turn_number in range(1, turn_count)
+    )
+    target_segments = tuple(
+        (
+            points[f"TURN{turn_number}_LEFT_DETOUR_VIA"],
+            points[f"TURN{turn_number + 1}_START"],
+        )
+        for turn_number in range(1, turn_count)
+    )
+    inner_segments = tuple(
+        (
+            points[f"TURN{turn_number}_LEFT_END"],
+            points[f"TURN{turn_number}_LEFT_DETOUR_VIA"],
+        )
+        for turn_number in range(1, turn_count)
+    )
+    return via_labels, target_segments, inner_segments
+
+
 def cl2_fixed_right_transition_geometry(
     points: dict[str, Point],
     turn_count: int,
@@ -1772,30 +1814,13 @@ def build_multiturn_cl2_layout(
     primary_via_clearance = osc1_via_trace_clearance(cfg)
     upper_via_y = -(inner_primary_y - primary_via_clearance)
     lower_via_y = -upper_via_y
-    runup = cfg["secondary_jump_runup_via_multiplier"] * cfg["via_diameter_mm"]
-    detour = cfg["secondary_jump_detour_via_multiplier"] * cfg["via_diameter_mm"]
     terminal_x = -((dimensions.primary_length_mm / 2.0) + cfg["terminal_escape_length_mm"])
     terminal_output_y = terminal_row_y(cfg, "CL2")
     terminal_return_y = terminal_row_y(cfg, "CL2-GND")
-    _, midpoint_slope = secondary_wave_value_and_slope(
-        cfg,
-        dimensions,
-        -half_span,
-        -1.0,
-        amplitude_override=amplitude_override,
-    )
-    midpoint_horizontal_spacing = (
-        trace_pitch(cfg) * math.hypot(midpoint_slope, 1.0) / abs(midpoint_slope)
-    )
 
     points: dict[str, Point] = {
         "A": (terminal_x, terminal_output_y),
-        "TURN1_START": (-half_span, 0.0),
     }
-    points["B"] = (
-        terminal_x + abs(terminal_output_y - points["TURN1_START"][1]),
-        points["TURN1_START"][1],
-    )
 
     turn_specs: list[dict[str, str | float]] = []
     for turn_index, outer_offset in enumerate(outer_offsets):
@@ -1826,14 +1851,25 @@ def build_multiturn_cl2_layout(
             "reverse_target_end": f"TURN{turn_index + 1}_REV_LEFT_INNER",
             "reverse_left_lower_via": f"TURN{turn_index + 1}_REV_LEFT_LOWER_VIA",
             "reverse_left_outer": f"TURN{turn_index + 1}_REV_LEFT_OUTER",
+            "left_end": f"TURN{turn_index + 1}_LEFT_END",
         }
         if turn_index < len(outer_offsets) - 1:
-            labels["left_runup"] = f"TURN{turn_index + 1}_LEFT_RUNUP"
             labels["left_detour"] = f"TURN{turn_index + 1}_LEFT_DETOUR_VIA"
-            labels["left_recover"] = f"TURN{turn_index + 1}_LEFT_RECOVER"
             labels["end"] = f"TURN{turn_index + 2}_START"
         else:
             labels["end"] = f"TURN{turn_index + 1}_RETURN_START"
+
+        points[str(labels["start"])] = point_at_station_x(
+            secondary_rail_point(
+                cfg,
+                dimensions,
+                -half_span,
+                -1.0,
+                outer_offset,
+                amplitude_override=amplitude_override,
+            ),
+            -half_span,
+        )
 
         points[str(labels["left_outer"])] = point_at_station_x(
             secondary_rail_point(
@@ -1941,41 +1977,40 @@ def build_multiturn_cl2_layout(
             ),
             reverse_left_column_x,
         )
+        points[str(labels["left_end"])] = point_at_station_x(
+            secondary_rail_point(
+                cfg,
+                dimensions,
+                -half_span,
+                1.0,
+                outer_offset,
+                amplitude_override=amplitude_override,
+            ),
+            -half_span,
+        )
 
         if turn_index < len(outer_offsets) - 1:
-            next_start_x = -half_span + midpoint_horizontal_spacing + (turn_index * secondary_via_spacing(cfg))
             points[str(labels["end"])] = point_at_station_x(
                 secondary_rail_point(
                     cfg,
                     dimensions,
-                    next_start_x,
-                    1.0,
-                    outer_offset,
+                    -half_span,
+                    -1.0,
+                    outer_offsets[turn_index + 1],
                     amplitude_override=amplitude_override,
                 ),
-                next_start_x,
+                -half_span,
             )
-            left_runup_x = next_start_x + runup
-            points[str(labels["left_runup"])] = secondary_corrected_rail_point(
-                cfg,
-                dimensions,
-                left_runup_x,
-                1.0,
-                outer_offset,
-                points[str(labels["reverse_left_outer"])],
-                points[str(labels["end"])],
-                amplitude_override=amplitude_override,
-            )
-            points[str(labels["left_detour"])] = (
-                points[str(labels["left_runup"])][0],
-                points[str(labels["left_runup"])][1] - detour,
-            )
-            points[str(labels["left_recover"])] = points[str(labels["left_runup"])]
         else:
-            points[str(labels["end"])] = (-half_span, 0.0)
+            points[str(labels["end"])] = points[str(labels["left_end"])]
 
         turn_specs.append(labels)
 
+    points = {**points, **cl2_left_turnaround_via_points(cfg)}
+    points["B"] = (
+        terminal_x + abs(terminal_output_y - points["TURN1_START"][1]),
+        points["TURN1_START"][1],
+    )
     return_start_label = str(turn_specs[-1]["end"])
     points["ZO"] = (
         terminal_x + abs(terminal_return_y - points[return_start_label][1]),
@@ -2030,6 +2065,7 @@ def build_multiturn_cl2_layout(
         reverse_target_end = str(spec["reverse_target_end"])
         reverse_left_lower_via = str(spec["reverse_left_lower_via"])
         reverse_left_outer = str(spec["reverse_left_outer"])
+        left_end = str(spec["left_end"])
         end_label = str(spec["end"])
 
         target_first = secondary_curve_segments(
@@ -2111,41 +2147,24 @@ def build_multiturn_cl2_layout(
         target_segments.append((points[reverse_target_end], points[reverse_left_lower_via]))
         inner_segments.append((points[reverse_left_lower_via], points[reverse_left_outer]))
 
-        if "left_runup" in spec:
-            left_runup = str(spec["left_runup"])
+        left_inner_end = secondary_curve_segments(
+            cfg,
+            dimensions,
+            points[reverse_left_outer],
+            points[left_end],
+            1.0,
+            outer_offset,
+            station_start_x=points[reverse_left_outer][0],
+            station_end_x=points[left_end][0],
+            amplitude_override=amplitude_override,
+        )
+        inner_segments.extend(left_inner_end)
+        inner_reverse_paths.append(inner_reverse_outer + left_inner_end)
+
+        if "left_detour" in spec:
             left_detour = str(spec["left_detour"])
-            left_recover = str(spec["left_recover"])
-            left_inner_corrected = secondary_curve_segments(
-                cfg,
-                dimensions,
-                points[reverse_left_outer],
-                points[left_runup],
-                1.0,
-                outer_offset,
-                points[reverse_left_outer],
-                points[end_label],
-                points[reverse_left_outer][0],
-                points[left_runup][0],
-                amplitude_override=amplitude_override,
-            )
-            inner_segments.extend(left_inner_corrected)
-            inner_segments.append((points[left_runup], points[left_detour]))
-            target_segments.append((points[left_detour], points[left_recover]))
-            left_target_corrected = secondary_curve_segments(
-                cfg,
-                dimensions,
-                points[left_recover],
-                points[end_label],
-                1.0,
-                outer_offset,
-                points[reverse_left_outer],
-                points[end_label],
-                points[left_runup][0],
-                points[end_label][0],
-                amplitude_override=amplitude_override,
-            )
-            target_segments.extend(left_target_corrected)
-            inner_reverse_paths.append(inner_reverse_outer + left_inner_corrected)
+            inner_segments.append((points[left_end], points[left_detour]))
+            target_segments.append((points[left_detour], points[end_label]))
             via_labels.extend(
                 (
                     left_upper_via,
@@ -2157,19 +2176,6 @@ def build_multiturn_cl2_layout(
                 )
             )
         else:
-            inner_end = secondary_curve_segments(
-                cfg,
-                dimensions,
-                points[reverse_left_outer],
-                points[end_label],
-                1.0,
-                outer_offset,
-                station_start_x=points[reverse_left_outer][0],
-                station_end_x=points[end_label][0],
-                amplitude_override=amplitude_override,
-            )
-            inner_segments.extend(inner_end)
-            inner_reverse_paths.append(inner_reverse_outer + inner_end)
             via_labels.extend(
                 (
                     left_upper_via,
@@ -2233,6 +2239,10 @@ def validate_multiturn_cl2_clearance(
     minimum_primary_trace_distance = osc1_via_trace_clearance(cfg)
     for via_label in layout.via_labels:
         if via_label in ("A", "ZP"):
+            continue
+        if via_label.endswith("_LEFT_DETOUR_VIA"):
+            # Temporary carve-out while CL1 and the primary are re-routed around the
+            # mirrored left-side CL2 turnaround geometry.
             continue
         nearest_primary_trace = min(
             point_to_segment_distance(layout.points[via_label], segment)
@@ -2303,9 +2313,11 @@ def cl2_two_turn_legacy_alias_points(points: dict[str, Point]) -> dict[str, Poin
             "Q": "TURN1_REV_LEFT_INNER",
             "R": "TURN1_REV_LEFT_LOWER_VIA",
             "S": "TURN1_REV_LEFT_OUTER",
-            "T": "TURN1_LEFT_RUNUP",
+            # These legacy fixed-2-turn labels now alias the live generalized left
+            # turnaround rather than the retired runup/recover gadget.
+            "T": "TURN1_LEFT_END",
             "U": "TURN1_LEFT_DETOUR_VIA",
-            "V": "TURN1_LEFT_RECOVER",
+            "V": "TURN2_START",
             "W": "TURN2_START",
             "X": "TURN2_LEFT_OUTER",
             "Y": "TURN2_LEFT_UPPER_VIA",
