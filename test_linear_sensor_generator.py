@@ -30,30 +30,32 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         transition_shift = pitch * (math.sqrt(2.0) - 1.0)
         junction_separation = generator.parallel_45_junction_separation(cfg)
 
-        self.assertEqual(coil.body_segments[0], (points["A"], points["B"]))
-        self.assertEqual(points["A"][1], points["B"][1])
-        self.assertEqual(points["A"][1], 0.0)
+        self.assertEqual(coil.body_segments[0], (points["A"], points["A_JOG"]))
+        self.assertEqual(points["A"][1], generator.terminal_row_y(cfg, "OSC1"))
+        self.assertIn((points["A_JOG"], points["B"]), coil.body_segments)
         self.assertIn((points["B"], points["C"]), coil.body_segments)
         self.assertIn((points["H"], points["I"]), coil.body_segments)
         self.assertIn((points["N"], points["O"]), coil.body_segments)
         self.assertEqual(coil.body_segments[-1], (points["T"], points["U"]))
         self.assertEqual(
             coil.escape_segments,
-            ((points["U"], points["VIN_JOG"]), (points["VIN_JOG"], points["V"])),
+            (
+                (points["U"], points["VIN_JOG"]),
+                (points["VIN_JOG"], points["VIN_APPROACH"]),
+                (points["VIN_APPROACH"], points["V"]),
+            ),
         )
-        self.assertEqual(points["U"][1], points["VIN_JOG"][1])
-        self.assertAlmostEqual(
-            abs(points["V"][0] - points["VIN_JOG"][0]),
-            abs(points["V"][1] - points["VIN_JOG"][1]),
-        )
-        self.assertAlmostEqual(abs(points["C"][0] - points["B"][0]), pitch / 2.0)
-        self.assertAlmostEqual(abs(points["C"][1] - points["B"][1]), pitch / 2.0)
+        self.assertEqual(points["VIN_JOG"][1], points["U"][1])
+        self.assertEqual(points["VIN_APPROACH"][1], points["V"][1])
+        self.assertEqual(points["C"][1], points["B"][1])
         self.assertAlmostEqual(abs(points["I"][0] - points["H"][0]), pitch)
         self.assertAlmostEqual(abs(points["I"][1] - points["H"][1]), pitch)
         self.assertAlmostEqual(points["J"][0] - points["D"][0], pitch)
         self.assertAlmostEqual(points["P"][0] - points["J"][0], pitch)
-        self.assertAlmostEqual(points["N"][1] - points["H"][1], -transition_shift)
+        self.assertAlmostEqual(points["I"][1] - points["H"][1], pitch)
+        self.assertAlmostEqual(points["O"][1] - points["N"][1], pitch)
         self.assertAlmostEqual(points["C"][1] - points["H"][1], junction_separation)
+        self.assertAlmostEqual(points["N"][1] - points["H"][1], -transition_shift)
         self.assertGreaterEqual(
             generator.point_to_segment_distance(points["H"], (points["B"], points["C"])),
             pitch,
@@ -71,8 +73,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
 
         self.assertEqual(points["A"][0], expected_terminal_x)
         self.assertEqual(points["V"][0], expected_terminal_x)
-        self.assertEqual(points["A"][1], 0.0)
-        self.assertEqual(points["U"][1], -1.2)
+        self.assertEqual(points["A"][1], generator.terminal_row_y(cfg, "OSC1"))
+        self.assertLess(points["U"][1], 0.0)
         self.assertEqual(points["VIN_JOG"][1], points["U"][1])
         self.assertEqual(points["V"][1], generator.terminal_row_y(cfg, "VIN"))
 
@@ -110,12 +112,12 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
         assert cl1 is not None and cl2 is not None
         terminals = (
+            ("OSC2", primary.pads["OSC2_A"]),
+            ("VIN", primary.pads["VIN_V"]),
+            ("OSC1", primary.pads["OSC1_A"]),
+            ("CL1", cl1.points["A"]),
             ("CL1-GND", cl1.points["ZN"]),
             ("CL2-GND", cl2.points["ZP"]),
-            ("VIN", primary.pads["VIN_V"]),
-            ("CL1", cl1.points["A"]),
-            ("OSC1", primary.pads["OSC1_A"]),
-            ("OSC2", primary.pads["OSC2_A"]),
             ("CL2", cl2.points["A"]),
         )
         expected_x = generator.terminal_column_x(cfg, primary.dimensions)
@@ -167,25 +169,19 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(cl1.points["B"][1], cl1.points["C"][1])
         self.assertEqual(cl1.points["ZN"][0], terminal_x)
         self.assertLess(cl1.points["ZM"][0], cl1.points["ZN"][0])
-        self.assertAlmostEqual(
-            abs(cl1.points["ZN"][0] - cl1.points["ZM"][0]),
-            abs(cl1.points["ZN"][1] - cl1.points["ZM"][1]),
-        )
+        self.assertEqual(cl1.points["ZM"][0], cl1.points["ZN_JOG"][0])
+        self.assertEqual(cl1.points["ZN_JOG"][1], cl1.points["ZN"][1])
 
         self.assertEqual(cl2.points["A"][0], terminal_x)
         self.assertLess(cl2.points["B"][0], cl2.points["A"][0])
         self.assertGreater(cl2.points["B"][0], sensor_edge_x)
-        self.assertAlmostEqual(
-            abs(cl2.points["A"][0] - cl2.points["B"][0]),
-            abs(cl2.points["A"][1] - cl2.points["B"][1]),
-        )
+        self.assertEqual(cl2.points["A"][1], cl2.points["A_FANOUT_JOG"][1])
+        self.assertEqual(cl2.points["A_FANOUT_JOG"][0], cl2.points["B"][0])
         self.assertEqual(cl2.points["ZP"][0], terminal_x)
         self.assertLess(cl2.points["ZO"][0], cl2.points["ZP"][0])
         self.assertGreater(cl2.points["ZO"][0], sensor_edge_x)
-        self.assertAlmostEqual(
-            abs(cl2.points["ZP"][0] - cl2.points["ZO"][0]),
-            abs(cl2.points["ZP"][1] - cl2.points["ZO"][1]),
-        )
+        self.assertEqual(cl2.points["ZO"][0], cl2.points["ZP_FANOUT_JOG"][0])
+        self.assertEqual(cl2.points["ZP_FANOUT_JOG"][1], cl2.points["ZP"][1])
 
     def test_configurable_fourth_turn_gets_generated_labels(self) -> None:
         cfg = generator.build_config({"number_of_primary_turns": 4})
@@ -204,24 +200,91 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertAlmostEqual(points["U"][0] - points["T"][0], expected_clearance)
         self.assertAlmostEqual(abs(points["U"][1] - points["T"][1]), expected_clearance)
 
-    def test_exit_offset_moves_internal_via_without_moving_terminal_row(self) -> None:
-        cfg = generator.build_config({"osc1_vin_exit_offset_mm": 0.55})
+    def test_vin_via_is_derived_from_inner_turn_clearance(self) -> None:
+        cfg = generator.build_config()
         points = generator.build_primary_geometry(cfg).coils[0].points
+        pitch = generator.trace_pitch(cfg)
+        via_clearance = generator.osc1_via_trace_clearance(cfg)
+        dimensions = generator.calculate_dimensions(cfg)
+        inner_turn = cfg["number_of_primary_turns"] - 1
+        inner_near_x = -(
+            (dimensions.primary_length_mm / 2.0) - (inner_turn * pitch)
+        )
+        inner_top_y = -(
+            (dimensions.primary_width_mm / 2.0) - (inner_turn * pitch)
+        )
 
-        self.assertEqual(points["U"][1], -0.55)
-        self.assertEqual(points["VIN_JOG"][1], points["U"][1])
+        self.assertAlmostEqual(points["U"][0], inner_near_x + via_clearance)
         self.assertAlmostEqual(
-            abs(points["V"][0] - points["VIN_JOG"][0]),
-            abs(points["V"][1] - points["VIN_JOG"][1]),
+            points["U"][1], inner_top_y + via_clearance + cfg["trace_spacing_mm"]
         )
         self.assertEqual(points["V"][1], generator.terminal_row_y(cfg, "VIN"))
         self.assertEqual(points["V"][0], points["A"][0])
 
-    def test_exit_offset_below_horizontal_trace_clearance_is_rejected(self) -> None:
-        cfg = generator.build_config({"osc1_vin_exit_offset_mm": 0.1})
+    def test_oscillator_fanout_routes_use_orthogonal_segments(self) -> None:
+        osc1, osc2 = generator.build_primary_geometry().coils
+        points1 = osc1.points
+        points2 = osc2.points
 
-        with self.assertRaisesRegex(ValueError, "too small for OSC1/VIN"):
-            generator.build_primary_geometry(cfg)
+        self.assertEqual(points1["A"][1], points1["A_JOG"][1])
+        self.assertEqual(points1["A_JOG"][0], points1["B"][0])
+        self.assertEqual(points1["B"][1], points1["C"][1])
+        self.assertEqual(points1["U"][1], points1["VIN_JOG"][1])
+        self.assertEqual(points1["VIN_JOG"][0], points1["VIN_APPROACH"][0])
+        self.assertEqual(points1["VIN_APPROACH"][1], points1["V"][1])
+
+        self.assertEqual(points2["A"][1], points2["A_JOG"][1])
+        self.assertEqual(points2["A_JOG"][0], points2["B"][0])
+        self.assertEqual(points2["B"][0], points2["C"][0])
+        self.assertEqual(points2["C"][1], points2["F"][1])
+        self.assertNotEqual(points2["F"][1], 0.0)
+        terminal_x = points2["A"][0]
+        self.assertTrue(
+            all(
+                point[0] >= terminal_x
+                for point in (points2["A"], points2["A_JOG"], points2["B"], points2["C"])
+            )
+        )
+
+    def test_moved_vin_via_clears_cl2_left_turnaround_for_all_turn_counts(self) -> None:
+        for fanout_side in ("left", "right"):
+            for turns in range(1, 6):
+                with self.subTest(fanout_side=fanout_side, turns=turns):
+                    cfg = generator.build_config(
+                        {
+                            "fanout_side": fanout_side,
+                            "number_of_secondary_turns": turns,
+                            "allow_invalid_geometry": False,
+                        }
+                    )
+                    primary = generator.build_primary_geometry(cfg)
+                    cl2 = generator.build_cl2_geometry(cfg, primary)
+                    assert cl2 is not None
+                    vin = primary.pads["VIN_U"]
+                    detours = tuple(
+                        point
+                        for label, point in cl2.points.items()
+                        if label.endswith("_LEFT_DETOUR_VIA")
+                    )
+                    for detour in detours:
+                        self.assertGreaterEqual(
+                            generator.distance(vin, detour) + 1e-9,
+                            generator.terminal_pad_pitch(cfg),
+                        )
+
+    def test_receiver_ground_escape_rows_stay_fixed_when_terminal_order_changes(self) -> None:
+        cfg = generator.build_config()
+        primary = generator.build_primary_geometry(cfg)
+        cl2 = generator.build_cl2_geometry(cfg, primary)
+        cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+        assert cl1 is not None and cl2 is not None
+
+        self.assertEqual(cl1.points["ZM"][1], generator.terminal_row_y(cfg, "CL1"))
+        self.assertEqual(cl1.points["ZN"][1], generator.terminal_row_y(cfg, "CL1-GND"))
+        self.assertEqual(cl1.points["ZM"][0], cl1.points["ZN_JOG"][0])
+        self.assertEqual(cl1.points["ZN_JOG"][1], cl1.points["ZN"][1])
+        self.assertEqual(cl2.points["ZO"][1], 0.0)
+        self.assertEqual(cl2.points["ZP"][1], generator.terminal_row_y(cfg, "CL2-GND"))
 
     def test_invalid_secondary_width_is_rejected(self) -> None:
         cfg = generator.build_config()
@@ -248,10 +311,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         self.assertEqual(points["S"], osc1.points["S"])
         self.assertEqual(points["V"], osc1.points["P"])
         self.assertEqual(points["A"][1], points["A_JOG"][1])
-        self.assertAlmostEqual(
-            abs(points["B"][0] - points["A_JOG"][0]),
-            abs(points["B"][1] - points["A_JOG"][1]),
-        )
+        self.assertEqual(points["B"][0], points["A_JOG"][0])
+        self.assertEqual(points["B"][1], points["F"][1])
         self.assertIn((osc1.points["G"], osc1.points["F"]), osc2.body_segments)
         self.assertIn((osc1.points["F"], osc1.points["E"]), osc2.body_segments)
         self.assertIn((osc1.points["M"], osc1.points["L"]), osc2.body_segments)
@@ -524,7 +585,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                         generator.secondary_via_spacing(cfg),
                     )
 
-    def test_multiturn_cl2_left_end_turnaround_uses_shared_left_edge_anchors(self) -> None:
+    def test_multiturn_cl2_left_end_turnaround_preserves_staggered_rail_anchors(self) -> None:
         for turns in range(1, 6):
             with self.subTest(turns=turns):
                 cfg = generator.build_config(
@@ -544,46 +605,38 @@ class LinearSensorGeneratorTests(unittest.TestCase):
 
                 for turn_index, outer_offset in enumerate(outer_offsets):
                     turn_number = turn_index + 1
-                    expected_start = generator.point_at_station_x(
-                        generator.secondary_rail_point(
-                            cfg,
-                            dimensions,
-                            -half_span,
-                            -1.0,
-                            outer_offset,
-                            amplitude_override=amplitude_override,
-                        ),
+                    expected_start = generator.secondary_rail_point(
+                        cfg,
+                        dimensions,
                         -half_span,
+                        -1.0,
+                        outer_offset,
+                        amplitude_override=amplitude_override,
                     )
-                    expected_left_end = generator.point_at_station_x(
-                        generator.secondary_rail_point(
-                            cfg,
-                            dimensions,
-                            -half_span,
-                            1.0,
-                            outer_offset,
-                            amplitude_override=amplitude_override,
-                        ),
+                    expected_left_end = generator.secondary_rail_point(
+                        cfg,
+                        dimensions,
                         -half_span,
+                        1.0,
+                        outer_offset,
+                        amplitude_override=amplitude_override,
                     )
 
                     self.assertEqual(cl2.points[f"TURN{turn_number}_START"], expected_start)
                     self.assertEqual(cl2.points[f"TURN{turn_number}_LEFT_END"], expected_left_end)
 
                     if turn_number < turns:
-                        self.assertIn(
-                            (
-                                cl2.points[f"TURN{turn_number}_LEFT_END"],
-                                cl2.points[f"TURN{turn_number}_LEFT_DETOUR_VIA"],
-                            ),
-                            cl2.inner_segments,
+                        self.assertTrue(
+                            any(
+                                segment[0] == cl2.points[f"TURN{turn_number}_LEFT_END"]
+                                for segment in cl2.inner_segments
+                            )
                         )
-                        self.assertIn(
-                            (
-                                cl2.points[f"TURN{turn_number}_LEFT_DETOUR_VIA"],
-                                cl2.points[f"TURN{turn_number + 1}_START"],
-                            ),
-                            cl2.target_segments,
+                        self.assertTrue(
+                            any(
+                                segment[1] == cl2.points[f"TURN{turn_number + 1}_START"]
+                                for segment in cl2.target_segments
+                            )
                         )
                         self.assertTrue(
                             any(
@@ -610,8 +663,20 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                     ),
                     max(turns - 1, 0),
                 )
+                starts = [cl2.points[f"TURN{turn_number}_START"] for turn_number in range(1, turns + 1)]
+                ends = [cl2.points[f"TURN{turn_number}_LEFT_END"] for turn_number in range(1, turns + 1)]
+                for first, second in zip(starts, starts[1:]):
+                    self.assertGreaterEqual(
+                        generator.distance(first, second) + 1e-9,
+                        generator.trace_pitch(cfg),
+                    )
+                for first, second in zip(ends, ends[1:]):
+                    self.assertGreaterEqual(
+                        generator.distance(first, second) + 1e-9,
+                        generator.trace_pitch(cfg),
+                    )
 
-    def test_multiturn_cl2_left_end_turnaround_packs_one_leftmost_centered_column(self) -> None:
+    def test_multiturn_cl2_left_end_turnaround_selects_a_compact_clearance_rack(self) -> None:
         for turns in range(1, 6):
             with self.subTest(turns=turns):
                 cfg = generator.build_config(
@@ -630,28 +695,167 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                     self.assertEqual(detours, [])
                     continue
 
-                unique_x = {round(point[0], 6) for point in detours}
-                expected_leftmost_u = (
-                    (generator.secondary_stroke_length(cfg) / 2.0)
-                    + generator.secondary_via_spacing(cfg)
+                edge_x = min(
+                    *(
+                        cl2.points[f"TURN{turn_number}_START"][0]
+                        for turn_number in range(2, turns + 1)
+                    ),
+                    *(
+                        cl2.points[f"TURN{turn_number}_LEFT_END"][0]
+                        for turn_number in range(1, turns)
+                    ),
                 )
-                expected_ys = generator.centered_positions(
-                    turns - 1,
-                    generator.secondary_via_spacing(cfg),
+                via_spacing = generator.secondary_via_spacing(cfg)
+                old_rack_x = edge_x - (4.0 * via_spacing)
+                self.assertGreater(
+                    sum(point[0] for point in detours) / len(detours),
+                    old_rack_x + (0.5 * via_spacing),
                 )
-
-                self.assertEqual(len(unique_x), 1)
-                self.assertAlmostEqual(
-                    generator.fanout_direction(cfg) * detours[0][0],
-                    expected_leftmost_u,
-                )
-                for detour, expected_y in zip(detours, expected_ys):
-                    self.assertAlmostEqual(detour[1], expected_y)
                 for first, second in zip(detours, detours[1:]):
-                    self.assertAlmostEqual(
-                        generator.distance(first, second),
-                        generator.secondary_via_spacing(cfg),
+                    self.assertGreaterEqual(
+                        generator.distance(first, second) + 1e-9,
+                        via_spacing,
                     )
+
+    def test_multiturn_cl2_left_handoff_bundle_keeps_trace_and_via_clearance(self) -> None:
+        for turns in range(2, 6):
+            with self.subTest(turns=turns):
+                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                dimensions = generator.calculate_dimensions(cfg)
+                primary = generator.build_primary_geometry(cfg)
+                layout = generator.build_multiturn_cl2_layout(cfg, dimensions, primary)
+                pitch = generator.trace_pitch(cfg)
+
+                for routes in (
+                    layout.left_target_handoff_paths,
+                    layout.left_inner_handoff_paths,
+                ):
+                    for first, second in zip(routes, routes[1:]):
+                        self.assertGreaterEqual(
+                            generator.path_to_path_distance(first, second) + 0.003,
+                            pitch,
+                        )
+
+                for handoff_index, route in enumerate(layout.left_target_handoff_paths):
+                    for path_index, path in enumerate(layout.target_forward_paths):
+                        if path_index == handoff_index + 1:
+                            continue
+                        self.assertGreaterEqual(
+                            generator.path_to_path_distance(route, path) + 0.003,
+                            pitch,
+                        )
+                for handoff_index, route in enumerate(layout.left_inner_handoff_paths):
+                    for path_index, path in enumerate(layout.inner_reverse_paths):
+                        if path_index == handoff_index:
+                            continue
+                        self.assertGreaterEqual(
+                            generator.path_to_path_distance(route, path) + 0.003,
+                            pitch,
+                        )
+
+    def test_multiturn_cl2_fanout_escapes_share_y_zero_and_clear_turnarounds(self) -> None:
+        for fanout_side in ("left", "right"):
+            for turns in range(1, 6):
+                with self.subTest(fanout_side=fanout_side, turns=turns):
+                    cfg = generator.build_config(
+                        {
+                            "fanout_side": fanout_side,
+                            "number_of_secondary_turns": turns,
+                            "allow_invalid_geometry": False,
+                        }
+                    )
+                    dimensions = generator.calculate_dimensions(cfg)
+                    primary = generator.build_primary_geometry(cfg)
+                    layout = generator.build_multiturn_cl2_layout(cfg, dimensions, primary)
+                    pitch = generator.trace_pitch(cfg)
+                    via_clearance = generator.via_to_trace_clearance(cfg)
+
+                    self.assertEqual(layout.points["B"], layout.points["ZO"])
+                    self.assertEqual(layout.points["B"][1], 0.0)
+                    convergence = layout.points["CL2_FANOUT_CONVERGENCE"]
+                    self.assertEqual(convergence[1], 0.0)
+                    self.assertEqual(layout.entry_escape_path[0][0], layout.points["A"])
+                    self.assertEqual(
+                        layout.entry_escape_path[-1][1], layout.points["TURN1_START"]
+                    )
+                    self.assertEqual(
+                        layout.return_escape_path[0][0],
+                        layout.points[f"TURN{turns}_RETURN_START"],
+                    )
+                    self.assertEqual(layout.return_escape_path[-1][1], layout.points["ZP"])
+                    if turns > 1:
+                        self.assertGreaterEqual(len(layout.entry_escape_path), 3)
+                        self.assertGreaterEqual(len(layout.return_escape_path), 3)
+                        detours = tuple(
+                            layout.points[f"TURN{turn_number}_LEFT_DETOUR_VIA"]
+                            for turn_number in range(1, turns)
+                        )
+                        side = generator.fanout_direction(cfg)
+                        outer_stack_x = (
+                            min(point[0] for point in detours)
+                            if side < 0.0
+                            else max(point[0] for point in detours)
+                        )
+                        self.assertAlmostEqual(
+                            convergence[0],
+                            outer_stack_x
+                            + (side * generator.via_to_trace_clearance(cfg)),
+                        )
+                        self.assertIn(
+                            (layout.points["B"], convergence),
+                            layout.entry_escape_path,
+                        )
+                        self.assertIn(
+                            (convergence, layout.points["ZO"]),
+                            layout.return_escape_path,
+                        )
+                        target_escape_start = layout.entry_escape_path[
+                            layout.entry_escape_path.index((layout.points["B"], convergence)) + 1
+                        ]
+                        return_escape_end = layout.return_escape_path[
+                            layout.return_escape_path.index((convergence, layout.points["ZO"])) - 1
+                        ]
+                        self.assertLess(target_escape_start[1][1], 0.0)
+                        self.assertGreater(return_escape_end[0][1], 0.0)
+
+                    checks = (
+                        (
+                            layout.entry_escape_path,
+                            layout.target_segments,
+                            layout.target_forward_paths[0],
+                        ),
+                        (
+                            layout.return_escape_path,
+                            layout.inner_segments,
+                            layout.inner_reverse_paths[-1],
+                        ),
+                    )
+                    for escape, layer_segments, connected_path in checks:
+                        obstacles = tuple(
+                            segment
+                            for segment in layer_segments
+                            if segment not in escape and segment not in connected_path
+                        )
+                        for segment in escape:
+                            self.assertTrue(
+                                all(
+                                    generator.segment_to_segment_distance(segment, obstacle)
+                                    + generator.ROUTING_POLYGONAL_TOLERANCE_MM
+                                    >= pitch
+                                    for obstacle in obstacles
+                                )
+                            )
+                            self.assertTrue(
+                                all(
+                                    generator.point_to_segment_distance(
+                                        layout.points[via_label], segment
+                                    )
+                                    + generator.ROUTING_POLYGONAL_TOLERANCE_MM
+                                    >= via_clearance
+                                    for via_label in layout.via_labels
+                                    if via_label not in ("A", "ZP")
+                                )
+                            )
 
     def test_multiturn_cl1_columns_center_on_midpoint_and_step_inward(self) -> None:
         for turns in (1, 3, 4, 5):

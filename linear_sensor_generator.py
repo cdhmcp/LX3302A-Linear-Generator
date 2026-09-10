@@ -12,12 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 import itertools
+import heapq
 import math
 from pathlib import Path
 
 
 MIL_TO_MM = 0.0254
 GEOMETRY_TOLERANCE_MM = 1e-9
+ROUTING_POLYGONAL_TOLERANCE_MM = 0.003
 
 Point = tuple[float, float]
 Segment = tuple[Point, Point]
@@ -40,14 +42,14 @@ PROPERTIES = {
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
-    "number_of_secondary_turns": 4,     # valid range: 1..5
+    "number_of_secondary_turns": 5,     # valid range: 1..5
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Trace & Via constraints 
     "trace_width_mm": 8 * MIL_TO_MM,
     "trace_spacing_mm": 9 * MIL_TO_MM,
-    "via_hole_size_mm": 10 * MIL_TO_MM,
-    "via_diameter_mm": 20 * MIL_TO_MM,
+    "via_hole_size_mm": 8 * MIL_TO_MM,
+    "via_diameter_mm": 16 * MIL_TO_MM,
  
     # Fanout tuning
     "fanout_side": "left",              # valid options: right OR left
@@ -70,7 +72,7 @@ PROPERTIES = {
     "generate_osc1": True,
     "generate_osc2": True,
     "generate_cl2": True,
-    "generate_cl1": False,
+    "generate_cl1": True,
     "allow_invalid_geometry": True,  # when True, skip copper/via validation checks so invalid footprints can still be rendered for visual debugging
 
 
@@ -158,6 +160,10 @@ class SecondaryLayoutPlan:
     target_reverse_paths: tuple[tuple[Segment, ...], ...]
     inner_forward_paths: tuple[tuple[Segment, ...], ...]
     inner_reverse_paths: tuple[tuple[Segment, ...], ...]
+    left_target_handoff_paths: tuple[tuple[Segment, ...], ...]
+    left_inner_handoff_paths: tuple[tuple[Segment, ...], ...]
+    entry_escape_path: tuple[Segment, ...]
+    return_escape_path: tuple[Segment, ...]
 
 
 @dataclass(frozen=True)
@@ -284,14 +290,14 @@ def terminal_column_x(cfg: dict, dimensions: SensorDimensions) -> float:
 
 
 def terminal_row_y(cfg: dict, pad_name: str) -> float:
-    """Return a compact terminal row with CL1 between VIN and OSC1."""
+    """Return the fanout order with the oscillator escapes above the receivers."""
     row_index = {
-        "CL1-GND": -4,
-        "CL2-GND": -3,
-        "VIN": -2,
+        "OSC2": -4,
+        "VIN": -3,
+        "OSC1": -2,
         "CL1": -1,
-        "OSC1": 0,
-        "OSC2": 1,
+        "CL1-GND": 0,
+        "CL2-GND": 1,
         "CL2": 2,
     }[pad_name]
     return row_index * terminal_pad_pitch(cfg)
@@ -633,15 +639,33 @@ def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, P
     half_width = dimensions.primary_width_mm / 2.0
     outer_near_x = side * half_length
     transition_half_height = pitch / 2.0
-    entry_x = outer_near_x + (side * transition_half_height)
     terminal_x = terminal_column_x(cfg, dimensions)
+    turn_count = cfg["number_of_primary_turns"]
+    inner_near_x = side * (half_length - ((turn_count - 1) * pitch))
+    via_transition = osc1_via_trace_clearance(cfg)
+    inner_top_y = -(half_width - ((turn_count - 1) * pitch))
+    # The shared VIN via sits beside the innermost vertical rail and below its
+    # top horizontal rail.  Work backward from its 45 degree approach so the
+    # inward transitions form nearly complete, pitch-preserving turns.
+    via_y = inner_top_y + via_transition + cfg["trace_spacing_mm"]
+    last_end_y = via_y - via_transition
+    start_y = (
+        last_end_y
+        + (turn_count * diagonal_junction_separation)
+        - ((turn_count - 1) * pitch)
+    )
+    terminal_y = terminal_row_y(cfg, "OSC1")
+    # Leave the terminal column toward the sensor, then use an orthogonal
+    # fanout dogleg before the long horizontal run into the first turn.
+    entry_outer_x = terminal_x - (side * via_transition)
+    entry_inner_x = entry_outer_x
     points: dict[str, Point] = {
-        "A": (terminal_x, terminal_row_y(cfg, "OSC1")),
-        "B": (entry_x, 0.0),
+        "A": (terminal_x, terminal_y),
+        "A_JOG": (entry_outer_x, terminal_y),
+        "B": (entry_inner_x, start_y),
     }
 
-    start_y = transition_half_height
-    for turn in range(cfg["number_of_primary_turns"]):
+    for turn in range(turn_count):
         x_near = side * (half_length - (turn * pitch))
         x_far = -x_near
         y_top = -(half_width - (turn * pitch))
@@ -656,20 +680,20 @@ def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, P
         points[end] = (x_near, start_y - diagonal_junction_separation)
         start_y = points[end][1] + pitch
 
-    inner_near_x = side * (half_length - ((cfg["number_of_primary_turns"] - 1) * pitch))
-    via_transition = osc1_via_trace_clearance(cfg)
-    last_end = osc1_turn_labels(cfg["number_of_primary_turns"] - 1)[5]
-    via_y = -cfg["osc1_vin_exit_offset_mm"]
-    # The requested exit Y controls U; T is shifted upward so T-U remains a
-    # 45 degree descent into the via while honoring via-to-trace clearance.
-    points[last_end] = (inner_near_x, via_y - via_transition)
+    last_end = osc1_turn_labels(turn_count - 1)[5]
+    # Place the shared VIN via outside the inner vertical rail and just below
+    # its top horizontal rail.  The horizontal separation is one normal
+    # via-to-trace clearance; the vertical separation contains two copper
+    # spacings (the normal clearance plus one additional trace spacing).
+    via_y = inner_top_y + via_transition + cfg["trace_spacing_mm"]
+    points[last_end] = (inner_near_x, last_end_y)
     via_x = inner_near_x - (side * via_transition)
     points["U"] = (via_x, via_y)
-    points["VIN_JOG"] = (
-        terminal_x - (side * abs(terminal_row_y(cfg, "VIN") - via_y)),
-        via_y,
-    )
+    # A direct orthogonal VIN escape is clear of the new oscillator fanout
+    # order when it first stops one via-to-trace clearance inside the column.
+    points["VIN_JOG"] = (terminal_x - (side * via_transition), via_y)
     points["V"] = (terminal_x, terminal_row_y(cfg, "VIN"))
+    points["VIN_APPROACH"] = (points["VIN_JOG"][0], points["V"][1])
     return points
 
 
@@ -678,7 +702,7 @@ def build_osc1_segments(
     points: dict[str, Point],
 ) -> tuple[tuple[Segment, ...], tuple[Segment, ...]]:
     """Return OSC1 bottom-layer winding and target-facing escape segments."""
-    point_sequence = ["A", "B"]
+    point_sequence = ["A", "A_JOG", "B"]
     for turn in range(cfg["number_of_primary_turns"]):
         point_sequence.extend(osc1_turn_labels(turn))
     point_sequence.append("U")
@@ -688,7 +712,8 @@ def build_osc1_segments(
     )
     escape_segments = (
         (points["U"], points["VIN_JOG"]),
-        (points["VIN_JOG"], points["V"]),
+        (points["VIN_JOG"], points["VIN_APPROACH"]),
+        (points["VIN_APPROACH"], points["V"]),
     )
     return body, escape_segments
 
@@ -732,19 +757,10 @@ def build_osc2_point_map(
     pitch = trace_pitch(cfg)
     junction_separation = parallel_45_junction_separation(cfg)
     via_clearance = osc1_via_trace_clearance(cfg)
-    pad_clearance = terminal_pad_pitch(cfg)
     turn_count = cfg["number_of_primary_turns"]
     outer_x = osc1_points[osc1_turn_labels(0)[1]][0]
-
-    # Leave the terminal column horizontally, then use one 45 degree jog into
-    # the midpoint entry after clearing the adjacent OSC1 terminal via.
-    a_jog_x = osc1_points["A"][0] - (side * via_clearance)
-    b_x = a_jog_x - (side * pad_clearance)
     points: dict[str, Point] = {
         "A": (osc1_points["A"][0], terminal_row_y(cfg, "OSC2")),
-        "A_JOG": (a_jog_x, terminal_row_y(cfg, "OSC2")),
-        "B": (b_x, 0.0),
-        "C": (outer_x + (side * 2.0 * pitch), 0.0),
         "X": osc1_points["U"],
     }
 
@@ -774,14 +790,25 @@ def build_osc2_point_map(
         transition_tail_y = points[near_label][1]
 
     points["F"] = (outer_x, transition_tail_y - junction_separation)
-    points["E"] = (outer_x + (side * pitch), points["F"][1] + pitch)
-    points["D"] = (points["E"][0], -pitch)
+    # Enter the oscillator at the existing outer-turn transition height rather
+    # than dropping to y=0.  The terminal-side route stays entirely inboard of
+    # the fanout via column and uses only horizontal and vertical legs.
+    entry_y = points["F"][1]
+    terminal_y = points["A"][1]
+    points["A_JOG"] = (
+        osc1_points["A"][0] - (side * via_clearance),
+        terminal_y,
+    )
+    points["B"] = (points["A_JOG"][0], entry_y)
+    points["C"] = points["B"]
+    points["D"] = points["C"]
+    points["E"] = points["F"]
     return points
 
 
 def build_osc2_segments(cfg: dict, points: dict[str, Point]) -> tuple[Segment, ...]:
     """Return OSC2 path in alphabetical point-map order, with hidden far corners."""
-    point_sequence = ["A", "A_JOG", "B", "C", "D", "E", "F"]
+    point_sequence = ["A", "A_JOG", "B", "F"]
     for turn in range(cfg["number_of_primary_turns"]):
         point_sequence.extend(osc2_turn_labels(turn))
         if turn < cfg["number_of_primary_turns"] - 1:
@@ -801,11 +828,6 @@ def validate_osc1_clearance(
 ) -> None:
     """Ensure the OSC1 via transition and terminal vias are manufacturable."""
     minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    if cfg["osc1_vin_exit_offset_mm"] < osc1_via_trace_clearance(cfg):
-        raise ValueError(
-            "osc1_vin_exit_offset_mm is too small for OSC1/VIN "
-            "via-to-trace clearance."
-        )
     for start, end in (("A", "V"), ("A", "U"), ("U", "V")):
         if distance(points[start], points[end]) < minimum_pad_distance:
             raise ValueError(f"OSC1 vias {start} and {end} violate plated via clearance.")
@@ -1431,6 +1453,1010 @@ def cl2_left_turnaround_segments(
     return via_labels, target_segments, inner_segments
 
 
+def via_to_trace_clearance(cfg: dict) -> float:
+    """Return the required centerline distance between a plated via and a trace."""
+    return (
+        (cfg["via_diameter_mm"] + cfg["trace_width_mm"]) / 2.0
+        + cfg["trace_spacing_mm"]
+    )
+
+
+def polyline_segments(points: tuple[Point, ...]) -> tuple[Segment, ...]:
+    """Convert a routed polyline into the footprint's segment representation."""
+    return tuple(zip(points, points[1:]))
+
+
+def simplify_polyline(points: tuple[Point, ...]) -> tuple[Point, ...]:
+    """Remove collinear lattice points from a clearance-routed polyline."""
+    if len(points) <= 2:
+        return points
+    simplified = [points[0]]
+    for index, point in enumerate(points[1:-1], start=1):
+        first = simplified[-1]
+        # The actual collinearity check uses the previous retained point and the
+        # next input point; keeping it here avoids emitting dense A* lattice lines.
+        next_point = points[index + 1]
+        cross = (
+            ((point[0] - first[0]) * (next_point[1] - point[1]))
+            - ((point[1] - first[1]) * (next_point[0] - point[0]))
+        )
+        if abs(cross) > GEOMETRY_TOLERANCE_MM:
+            simplified.append(point)
+    simplified.append(points[-1])
+    return tuple(simplified)
+
+
+def segment_clears_obstacles(
+    segment: Segment,
+    obstacles: tuple[Segment, ...],
+    required_clearance: float,
+) -> bool:
+    """Return whether one candidate route segment clears every obstacle segment."""
+    return all(
+        segment_to_segment_distance(segment, obstacle) + ROUTING_POLYGONAL_TOLERANCE_MM
+        >= required_clearance
+        for obstacle in obstacles
+    )
+
+
+def left_handoff_escape_point(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    point: Point,
+    phase_sign: float,
+    escape_length: float,
+    amplitude_override: float,
+) -> Point:
+    """Extend a left-edge rail endpoint outward along its local tangent."""
+    half_span = secondary_stroke_length(cfg) / 2.0
+    _, slope = secondary_wave_value_and_slope(
+        cfg,
+        dimensions,
+        -half_span,
+        phase_sign,
+        amplitude_override=amplitude_override,
+    )
+    return (point[0] - escape_length, point[1] - (slope * escape_length))
+
+
+def route_left_handoff_channel(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    start: Point,
+    via: Point,
+    escape_direction: Point,
+    obstacles: tuple[Segment, ...],
+) -> tuple[Segment, ...] | None:
+    """Route one left-side handoff through a compact outward-only clearance channel.
+
+    The initial tangent runout keeps the departure at the rail's preserved pitch.
+    A small deterministic A* lattice then finds the shortest remaining polyline
+    to the selected via without allowing a return toward the coil body.
+    """
+    trace_clearance = trace_pitch(cfg)
+    escape_length = max(trace_clearance * 2.0, secondary_via_spacing(cfg))
+    direction_length = math.hypot(*escape_direction)
+    if direction_length <= GEOMETRY_TOLERANCE_MM:
+        return None
+    escape = (
+        start[0] + ((escape_direction[0] / direction_length) * escape_length),
+        start[1] + ((escape_direction[1] / direction_length) * escape_length),
+    )
+    initial_segment = (start, escape)
+    if not segment_clears_obstacles(initial_segment, obstacles, trace_clearance):
+        return None
+
+    # A 50 um lattice is significantly finer than the normal fabrication rules
+    # while keeping the small (1..5 turn) local routing problem inexpensive.
+    step = 0.05
+    route_margin = max(2.0 * secondary_via_spacing(cfg), 1.5)
+    min_x = min(escape[0], via[0]) - step
+    max_columns = max(1, math.ceil((escape[0] - min_x) / step))
+    vertical_extent = max(
+        1,
+        math.ceil((abs(via[1] - escape[1]) + route_margin) / step),
+    )
+    min_y = escape[1] - (vertical_extent * step)
+    max_rows = vertical_extent * 2
+    # Keep the escape point on the lattice exactly; rounding it onto a nearby
+    # row can put a nominal-pitch departure infinitesimally inside a neighbor's
+    # clearance envelope.
+    start_row = vertical_extent
+
+    def point_at(column: int, row: int) -> Point:
+        return (escape[0] - (column * step), min_y + (row * step))
+
+    start_node = (0, start_row)
+    frontier: list[tuple[float, float, tuple[int, int]]] = []
+    heapq.heappush(frontier, (distance(escape, via), 0.0, start_node))
+    cost: dict[tuple[int, int], float] = {start_node: 0.0}
+    predecessor: dict[tuple[int, int], tuple[int, int] | None] = {start_node: None}
+    goal_node: tuple[int, int] | None = None
+
+    while frontier:
+        _, current_cost, current = heapq.heappop(frontier)
+        if current_cost != cost.get(current):
+            continue
+        current_point = point_at(*current)
+        if segment_clears_obstacles((current_point, via), obstacles, trace_clearance):
+            goal_node = current
+            break
+
+        for column_delta in (-1, 0, 1):
+            next_column = current[0] + column_delta
+            if not 0 <= next_column <= max_columns:
+                continue
+            for row_delta in (-1, 0, 1):
+                if column_delta == 0 and row_delta == 0:
+                    continue
+                next_row = current[1] + row_delta
+                if not 0 <= next_row <= max_rows:
+                    continue
+                neighbor = (next_column, next_row)
+                neighbor_point = point_at(*neighbor)
+                candidate_segment = (current_point, neighbor_point)
+                if not segment_clears_obstacles(
+                    candidate_segment, obstacles, trace_clearance
+                ):
+                    continue
+                candidate_cost = current_cost + distance(current_point, neighbor_point)
+                if candidate_cost + GEOMETRY_TOLERANCE_MM >= cost.get(neighbor, float("inf")):
+                    continue
+                cost[neighbor] = candidate_cost
+                predecessor[neighbor] = current
+                heuristic = distance(neighbor_point, via)
+                heapq.heappush(
+                    frontier,
+                    (candidate_cost + heuristic, candidate_cost, neighbor),
+                )
+
+    if goal_node is None:
+        return None
+
+    nodes: list[tuple[int, int]] = []
+    current: tuple[int, int] | None = goal_node
+    while current is not None:
+        nodes.append(current)
+        current = predecessor[current]
+    nodes.reverse()
+    polyline = (start, escape, *(point_at(*node) for node in nodes[1:]), via)
+    return polyline_segments(simplify_polyline(polyline))
+
+
+def route_clears_vias(
+    route: tuple[Segment, ...],
+    other_vias: tuple[Point, ...],
+    cfg: dict,
+) -> bool:
+    """Return whether a routed trace stays clear of all non-connected vias."""
+    clearance = via_to_trace_clearance(cfg)
+    return all(
+        point_to_segment_distance(via, segment) + GEOMETRY_TOLERANCE_MM >= clearance
+        for via in other_vias
+        for segment in route
+    )
+
+
+def route_cl2_fanout_escape(
+    cfg: dict,
+    start: Point,
+    end: Point,
+    obstacles: tuple[Segment, ...],
+    obstacle_vias: tuple[Point, ...],
+) -> tuple[Segment, ...]:
+    """Return the shortest local, clearance-safe CL2 fanout escape route.
+
+    CL2's first and final rails must pass around the outside of the left
+    turnaround bundle.  A coarse routing lattice is sufficient here: it is
+    only used in the small area between the common y=0 fanout spine and the
+    coil edge, and each retained shortcut is checked using the exact segment
+    clearance routines.  The lattice keeps the result deterministic for all
+    supported secondary-turn counts while the shortcut pass keeps the emitted
+    footprint compact.
+    """
+    if distance(start, end) <= GEOMETRY_TOLERANCE_MM:
+        return ()
+
+    trace_clearance = trace_pitch(cfg)
+    via_clearance = via_to_trace_clearance(cfg)
+    step = min(0.10, trace_clearance / 4.0)
+    route_margin = max(2.0 * trace_clearance, secondary_via_spacing(cfg))
+    minimum_x = min(start[0], end[0]) - route_margin
+    maximum_x = max(start[0], end[0]) + route_margin
+    minimum_y = min(start[1], end[1]) - route_margin
+    maximum_y = max(start[1], end[1]) + route_margin
+
+    # Ignore remote waveform samples.  They cannot be reached by this local
+    # escape search, and omitting them makes the exact final checks inexpensive.
+    local_obstacles = tuple(
+        segment
+        for segment in obstacles
+        if (
+            max(segment[0][0], segment[1][0]) >= minimum_x - trace_clearance
+            and min(segment[0][0], segment[1][0]) <= maximum_x + trace_clearance
+            and max(segment[0][1], segment[1][1]) >= minimum_y - trace_clearance
+            and min(segment[0][1], segment[1][1]) <= maximum_y + trace_clearance
+        )
+    )
+    local_vias = tuple(
+        via
+        for via in obstacle_vias
+        if (
+            minimum_x - via_clearance <= via[0] <= maximum_x + via_clearance
+            and minimum_y - via_clearance <= via[1] <= maximum_y + via_clearance
+        )
+    )
+
+    def segment_is_clear(segment: Segment) -> bool:
+        return (
+            segment_clears_obstacles(segment, local_obstacles, trace_clearance)
+            and all(
+                point_to_segment_distance(via, segment)
+                + ROUTING_POLYGONAL_TOLERANCE_MM
+                >= via_clearance
+                for via in local_vias
+            )
+        )
+
+    if segment_is_clear((start, end)):
+        return ((start, end),)
+
+    column_count = max(1, math.ceil((maximum_x - minimum_x) / step))
+    row_count = max(1, math.ceil((maximum_y - minimum_y) / step))
+    start_node = (
+        round((start[0] - minimum_x) / step),
+        round((start[1] - minimum_y) / step),
+    )
+    start_node = (
+        min(max(start_node[0], 0), column_count),
+        min(max(start_node[1], 0), row_count),
+    )
+
+    def node_point(node: tuple[int, int]) -> Point:
+        return (minimum_x + (node[0] * step), minimum_y + (node[1] * step))
+
+    # If every lattice node is this far from an obstacle, the intervening
+    # 8-connected segment remains clear as well.  Exact checks are still used
+    # for the final shortcut route below.
+    node_guard = (step * math.sqrt(2.0) / 2.0) + ROUTING_POLYGONAL_TOLERANCE_MM
+    node_clear_cache: dict[tuple[int, int], bool] = {}
+
+    def node_is_clear(node: tuple[int, int]) -> bool:
+        cached = node_clear_cache.get(node)
+        if cached is not None:
+            return cached
+        point = node_point(node)
+        clear = (
+            all(
+                point_to_segment_distance(point, segment) + ROUTING_POLYGONAL_TOLERANCE_MM
+                >= trace_clearance + node_guard
+                for segment in local_obstacles
+            )
+            and all(
+                distance(point, via) + ROUTING_POLYGONAL_TOLERANCE_MM
+                >= via_clearance + node_guard
+                for via in local_vias
+            )
+        )
+        node_clear_cache[node] = clear
+        return clear
+
+    frontier: list[tuple[float, float, tuple[int, int]]] = []
+    heapq.heappush(frontier, (distance(start, end), 0.0, start_node))
+    costs: dict[tuple[int, int], float] = {start_node: 0.0}
+    predecessors: dict[tuple[int, int], tuple[int, int] | None] = {start_node: None}
+    goal_node: tuple[int, int] | None = None
+
+    while frontier:
+        _, current_cost, current = heapq.heappop(frontier)
+        if current_cost != costs.get(current):
+            continue
+        current_point = start if current == start_node else node_point(current)
+        if segment_is_clear((current_point, end)):
+            goal_node = current
+            break
+        for x_delta in (-1, 0, 1):
+            for y_delta in (-1, 0, 1):
+                if x_delta == 0 and y_delta == 0:
+                    continue
+                neighbor = (current[0] + x_delta, current[1] + y_delta)
+                if not (
+                    0 <= neighbor[0] <= column_count
+                    and 0 <= neighbor[1] <= row_count
+                    and node_is_clear(neighbor)
+                ):
+                    continue
+                neighbor_point = node_point(neighbor)
+                candidate_cost = current_cost + distance(current_point, neighbor_point)
+                if candidate_cost + GEOMETRY_TOLERANCE_MM >= costs.get(
+                    neighbor, float("inf")
+                ):
+                    continue
+                costs[neighbor] = candidate_cost
+                predecessors[neighbor] = current
+                heapq.heappush(
+                    frontier,
+                    (
+                        candidate_cost + distance(neighbor_point, end),
+                        candidate_cost,
+                        neighbor,
+                    ),
+                )
+
+    if goal_node is None:
+        raise ValueError("CL2 fanout escape could not satisfy configured clearance.")
+
+    nodes: list[tuple[int, int]] = []
+    current: tuple[int, int] | None = goal_node
+    while current is not None:
+        nodes.append(current)
+        current = predecessors[current]
+    route_points = [start, *(node_point(node) for node in reversed(nodes[:-1])), end]
+
+    # Greedily retain the farthest exact-clear point.  This removes the lattice
+    # stair-steps and minimizes the emitted copper length for the chosen route.
+    simplified = [route_points[0]]
+    point_index = 0
+    while point_index < len(route_points) - 1:
+        next_index = len(route_points) - 1
+        while next_index > point_index + 1:
+            if segment_is_clear((route_points[point_index], route_points[next_index])):
+                break
+            next_index -= 1
+        simplified.append(route_points[next_index])
+        point_index = next_index
+    return polyline_segments(tuple(simplified))
+
+
+def route_cl2_fanout_wrap(
+    cfg: dict,
+    convergence: Point,
+    endpoint: Point,
+    via_stack: tuple[Point, ...],
+    wrap_sign: float,
+    fanout_side: float,
+    obstacles: tuple[Segment, ...],
+    obstacle_vias: tuple[Point, ...],
+) -> tuple[Segment, ...]:
+    """Route one CL2 fanout trace around a specified side of the via stack.
+
+    The fanout must not take the geometrically shortest diagonal around the
+    turnaround vias: that produces the wrong topology and obscures the shared
+    y=0 trunk.  This route instead makes a compact three-sided wrap.  Target
+    entry uses the negative-y side of the stack, while the inner return uses
+    the positive-y side.  A small candidate sweep keeps the wrap minimal while
+    retaining exact trace and via clearance checks.
+    """
+    trace_clearance = trace_pitch(cfg)
+    via_clearance = via_to_trace_clearance(cfg)
+
+    def route_is_clear(route: tuple[Segment, ...]) -> bool:
+        return all(
+            segment_clears_obstacles(segment, obstacles, trace_clearance)
+            and all(
+                point_to_segment_distance(via, segment)
+                + ROUTING_POLYGONAL_TOLERANCE_MM
+                >= via_clearance
+                for via in obstacle_vias
+            )
+            for segment in route
+        )
+
+    if not via_stack:
+        direct = ((convergence, endpoint),)
+        if route_is_clear(direct):
+            return direct
+        raise ValueError("CL2 fanout escape could not clear the coil edge.")
+
+    # The stack-facing corner must lie beyond every detour via, not merely the
+    # first one, so a diagonal/staggered via rack still receives a true wrap.
+    if fanout_side < 0.0:
+        stack_inner_x = max(point[0] for point in via_stack) + via_clearance
+    else:
+        stack_inner_x = min(point[0] for point in via_stack) - via_clearance
+    stack_wrap_y = (
+        (min(point[1] for point in via_stack) - via_clearance)
+        if wrap_sign < 0.0
+        else (max(point[1] for point in via_stack) + via_clearance)
+    )
+
+    best_route: tuple[Segment, ...] | None = None
+    best_length = float("inf")
+    # The first candidate is the tightest legal wrap.  Extra margins are only
+    # considered if local coil geometry needs more room.
+    for margin_multiplier in (0.0, 0.5, 1.0, 1.5, 2.0):
+        wrap_y = stack_wrap_y + (wrap_sign * margin_multiplier * trace_clearance)
+        for inner_multiplier in (0.0, 0.5, 1.0):
+            inner_x = stack_inner_x - (fanout_side * inner_multiplier * trace_clearance)
+            route = polyline_segments(
+                (convergence, (convergence[0], wrap_y), (inner_x, wrap_y), endpoint)
+            )
+            if not route_is_clear(route):
+                continue
+            route_length = sum(distance(*segment) for segment in route)
+            if route_length + GEOMETRY_TOLERANCE_MM < best_length:
+                best_route = route
+                best_length = route_length
+
+    if best_route is None:
+        raise ValueError("CL2 fanout wrap could not satisfy configured clearance.")
+    return best_route
+
+
+def build_cl2_left_turnaround_plan(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    points: dict[str, Point],
+    outer_offsets: tuple[float, ...],
+    amplitude_override: float,
+) -> tuple[dict[str, Point], dict[int, tuple[Segment, ...]], dict[int, tuple[Segment, ...]]]:
+    """Route left CL2 inter-turn handoffs with staggered endpoints and local DRC.
+
+    Each layer exits along a tangent before entering an outward-only channel.  The
+    small candidate search varies the detour-via rack and returns the shortest
+    all-clear result, which keeps the algorithm practical and deterministic for
+    one through five receiver turns.
+    """
+    handoff_count = len(outer_offsets) - 1
+    if handoff_count <= 0:
+        return {}, {}, {}
+
+    half_span = secondary_stroke_length(cfg) / 2.0
+    trace_clearance = trace_pitch(cfg)
+    via_spacing = secondary_via_spacing(cfg)
+    target_start_paths = tuple(
+        secondary_curve_segments(
+            cfg,
+            dimensions,
+            points[f"TURN{turn_number}_START"],
+            points[f"TURN{turn_number}_LEFT_OUTER"],
+            -1.0,
+            outer_offsets[turn_number - 1],
+            station_start_x=-half_span,
+            station_end_x=points[f"TURN{turn_number}_LEFT_OUTER"][0],
+            mirror_phase_sign=False,
+            amplitude_override=amplitude_override,
+        )
+        for turn_number in range(1, handoff_count + 2)
+    )
+    inner_end_paths = tuple(
+        secondary_curve_segments(
+            cfg,
+            dimensions,
+            points[f"TURN{turn_number}_REV_LEFT_OUTER"],
+            points[f"TURN{turn_number}_LEFT_END"],
+            1.0,
+            outer_offsets[turn_number - 1],
+            station_start_x=points[f"TURN{turn_number}_REV_LEFT_OUTER"][0],
+            station_end_x=-half_span,
+            mirror_phase_sign=False,
+            amplitude_override=amplitude_override,
+        )
+        for turn_number in range(1, handoff_count + 2)
+    )
+    edge_x = min(
+        *(points[f"TURN{turn_number}_START"][0] for turn_number in range(1, handoff_count + 2)),
+        *(points[f"TURN{turn_number}_LEFT_END"][0] for turn_number in range(1, handoff_count + 2)),
+    )
+    rack_shifts = tuple(
+        shift * (via_spacing / 2.0)
+        for shift in range(-2, 5)
+    )
+    best_plan: tuple[
+        float,
+        dict[str, Point],
+        dict[int, tuple[Segment, ...]],
+        dict[int, tuple[Segment, ...]],
+    ] | None = None
+
+    for rack_offset in (1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 20.0):
+        rack_x = edge_x - (rack_offset * via_spacing)
+        for rack_shift in rack_shifts:
+            via_points = {
+                f"TURN{turn_number}_LEFT_DETOUR_VIA": (rack_x, via_y + rack_shift)
+                for turn_number, via_y in enumerate(
+                    centered_positions(handoff_count, via_spacing), start=1
+                )
+            }
+            vias = tuple(via_points.values())
+            if any(
+                point_to_segment_distance(via, segment) + GEOMETRY_TOLERANCE_MM
+                < via_to_trace_clearance(cfg)
+                for via in vias
+                for path in target_start_paths + inner_end_paths
+                for segment in path
+            ):
+                continue
+
+            target_routes: dict[int, tuple[Segment, ...]] = {}
+            target_ok = True
+            for handoff_index in range(handoff_count):
+                obstacles = tuple(
+                    segment
+                    for path_index, path in enumerate(target_start_paths)
+                    if path_index != handoff_index + 1
+                    for segment in path
+                ) + tuple(
+                    segment for route in target_routes.values() for segment in route
+                )
+                route = route_left_handoff_channel(
+                    cfg,
+                    dimensions,
+                    points[f"TURN{handoff_index + 2}_START"],
+                    vias[handoff_index],
+                    (
+                        points[f"TURN{handoff_index + 2}_START"][0]
+                        - target_start_paths[handoff_index + 1][0][1][0],
+                        points[f"TURN{handoff_index + 2}_START"][1]
+                        - target_start_paths[handoff_index + 1][0][1][1],
+                    ),
+                    obstacles,
+                )
+                if route is None or not route_clears_vias(
+                    route, vias[:handoff_index] + vias[handoff_index + 1:], cfg
+                ):
+                    target_ok = False
+                    break
+                target_routes[handoff_index] = route
+            if not target_ok:
+                continue
+
+            inner_routes: dict[int, tuple[Segment, ...]] = {}
+            inner_ok = True
+            for handoff_index in range(handoff_count):
+                obstacles = tuple(
+                    segment
+                    for path_index, path in enumerate(inner_end_paths)
+                    if path_index != handoff_index
+                    for segment in path
+                ) + tuple(
+                    segment for route in inner_routes.values() for segment in route
+                )
+                route = route_left_handoff_channel(
+                    cfg,
+                    dimensions,
+                    points[f"TURN{handoff_index + 1}_LEFT_END"],
+                    vias[handoff_index],
+                    (
+                        inner_end_paths[handoff_index][-1][1][0]
+                        - inner_end_paths[handoff_index][-1][0][0],
+                        inner_end_paths[handoff_index][-1][1][1]
+                        - inner_end_paths[handoff_index][-1][0][1],
+                    ),
+                    obstacles,
+                )
+                if route is None or not route_clears_vias(
+                    route, vias[:handoff_index] + vias[handoff_index + 1:], cfg
+                ):
+                    inner_ok = False
+                    break
+                inner_routes[handoff_index] = route
+            if not inner_ok:
+                continue
+
+            score = sum(
+                distance(*segment)
+                for route in (*target_routes.values(), *inner_routes.values())
+                for segment in route
+            )
+            candidate = (score, via_points, target_routes, inner_routes)
+            if best_plan is None or candidate[0] < best_plan[0]:
+                best_plan = candidate
+
+    if best_plan is None:
+        raise ValueError("CL2 left-end turnaround could not be routed with configured clearance.")
+    _, via_points, target_routes, inner_routes = best_plan
+    return via_points, target_routes, inner_routes
+
+
+def build_cl2_left_channel_turnaround_plan(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    points: dict[str, Point],
+    outer_offsets: tuple[float, ...],
+    amplitude_override: float,
+) -> tuple[dict[str, Point], dict[int, tuple[Segment, ...]], dict[int, tuple[Segment, ...]]]:
+    """Build ordered two-bend left handoffs in a shared outward channel.
+
+    The channel lanes are trace-pitch apart, while the via rack is via-pitch
+    apart.  That monotonic expansion prevents one handoff from pinching the
+    next as it leaves the staggered coil endpoints.
+    """
+    handoff_count = len(outer_offsets) - 1
+    if handoff_count <= 0:
+        return {}, {}, {}
+
+    half_span = secondary_stroke_length(cfg) / 2.0
+    trace_clearance = trace_pitch(cfg)
+    via_spacing = secondary_via_spacing(cfg)
+    escape_length = max(trace_clearance * 2.0, via_spacing)
+
+    target_escapes: list[Point] = []
+    inner_escapes: list[Point] = []
+    for handoff_index in range(handoff_count):
+        target_turn = handoff_index + 2
+        target_start = points[f"TURN{target_turn}_START"]
+        target_path = secondary_curve_segments(
+            cfg,
+            dimensions,
+            target_start,
+            points[f"TURN{target_turn}_LEFT_OUTER"],
+            -1.0,
+            outer_offsets[target_turn - 1],
+            station_start_x=-half_span,
+            station_end_x=points[f"TURN{target_turn}_LEFT_OUTER"][0],
+            amplitude_override=amplitude_override,
+        )
+        target_escapes.append(
+            left_handoff_escape_point(
+                cfg,
+                dimensions,
+                target_start,
+                -1.0,
+                escape_length,
+                amplitude_override,
+            )
+        )
+
+        inner_turn = handoff_index + 1
+        inner_end = points[f"TURN{inner_turn}_LEFT_END"]
+        inner_path = secondary_curve_segments(
+            cfg,
+            dimensions,
+            points[f"TURN{inner_turn}_REV_LEFT_OUTER"],
+            inner_end,
+            1.0,
+            outer_offsets[inner_turn - 1],
+            station_start_x=points[f"TURN{inner_turn}_REV_LEFT_OUTER"][0],
+            station_end_x=-half_span,
+            amplitude_override=amplitude_override,
+        )
+        inner_escapes.append(
+            left_handoff_escape_point(
+                cfg,
+                dimensions,
+                inner_end,
+                1.0,
+                escape_length,
+                amplitude_override,
+            )
+        )
+
+    channel_x = min(*(point[0] for point in target_escapes + inner_escapes)) - via_spacing
+    via_x = channel_x - via_spacing
+    via_points = {
+        f"TURN{turn_number}_LEFT_DETOUR_VIA": (via_x, via_y)
+        for turn_number, via_y in enumerate(
+            centered_positions(handoff_count, 2.0 * via_spacing), start=1
+        )
+    }
+
+    def channel_routes(
+        starts: list[Point],
+        escapes: list[Point],
+    ) -> dict[int, tuple[Segment, ...]]:
+        first_lane_y = escapes[0][1]
+        routes: dict[int, tuple[Segment, ...]] = {}
+        for handoff_index, (start, escape) in enumerate(zip(starts, escapes)):
+            lane = (channel_x, first_lane_y + (handoff_index * trace_clearance))
+            via = via_points[f"TURN{handoff_index + 1}_LEFT_DETOUR_VIA"]
+            routes[handoff_index] = polyline_segments((start, escape, lane, via))
+        return routes
+
+    target_routes = channel_routes(
+        [points[f"TURN{turn_number}_START"] for turn_number in range(2, handoff_count + 2)],
+        target_escapes,
+    )
+    inner_routes = channel_routes(
+        [points[f"TURN{turn_number}_LEFT_END"] for turn_number in range(1, handoff_count + 1)],
+        inner_escapes,
+    )
+    return via_points, target_routes, inner_routes
+
+
+def build_cl2_left_bundle_turnaround_plan(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    points: dict[str, Point],
+    outer_offsets: tuple[float, ...],
+    amplitude_override: float,
+) -> tuple[dict[str, Point], dict[int, tuple[Segment, ...]], dict[int, tuple[Segment, ...]]]:
+    """Fan left handoffs through two smooth, pitch-preserving trace bundles.
+
+    The target and inner endpoints have opposite local rail normals, so a
+    straight shared via rack pinches one of the two layers. Each layer instead
+    follows its own gently rotating bundle: adjacent routes begin one trace
+    pitch apart, expand monotonically to the via pitch, and finish at a compact
+    candidate rack that may be vertical or diagonally staggered.
+    """
+    handoff_count = len(outer_offsets) - 1
+    if handoff_count <= 0:
+        return {}, {}, {}
+
+    trace_clearance = trace_pitch(cfg)
+    via_spacing = secondary_via_spacing(cfg)
+    source_points = [
+        points[f"TURN{turn_number}_START"]
+        for turn_number in range(2, handoff_count + 2)
+    ] + [
+        points[f"TURN{turn_number}_LEFT_END"]
+        for turn_number in range(1, handoff_count + 1)
+    ]
+    source_edge_x = min(point[0] for point in source_points)
+
+    def bundled_routes(
+        starts: list[Point],
+        phase_sign: float,
+        via_points: dict[str, Point],
+        sample_count_override: int | None = None,
+    ) -> dict[int, tuple[Segment, ...]]:
+        if handoff_count == 1:
+            start = starts[0]
+            via = via_points["TURN1_LEFT_DETOUR_VIA"]
+            route_length = abs(via[0] - start[0])
+            control_1 = left_handoff_escape_point(
+                cfg,
+                dimensions,
+                start,
+                phase_sign,
+                route_length * 0.45,
+                amplitude_override,
+            )
+            control_2 = (via[0] + (route_length * 0.25), via[1])
+            sample_count = (
+                max(32, cfg["secondary_curve_samples_per_cycle"] // 4)
+                if sample_count_override is None
+                else sample_count_override
+            )
+            path: list[Point] = []
+            for sample_index in range(sample_count + 1):
+                fraction = sample_index / sample_count
+                inverse = 1.0 - fraction
+                path.append(
+                    (
+                        (inverse ** 3 * start[0])
+                        + (3.0 * inverse * inverse * fraction * control_1[0])
+                        + (3.0 * inverse * fraction * fraction * control_2[0])
+                        + (fraction ** 3 * via[0]),
+                        (inverse ** 3 * start[1])
+                        + (3.0 * inverse * inverse * fraction * control_1[1])
+                        + (3.0 * inverse * fraction * fraction * control_2[1])
+                        + (fraction ** 3 * via[1]),
+                    )
+                )
+            path[0] = start
+            path[-1] = via
+            return {0: polyline_segments(tuple(path))}
+        midpoint = (handoff_count - 1) / 2.0
+        center_start = (
+            sum(point[0] for point in starts) / handoff_count,
+            sum(point[1] for point in starts) / handoff_count,
+        )
+        normal_start = (
+            (starts[-1][0] - starts[0][0]) / ((handoff_count - 1) * trace_clearance),
+            (starts[-1][1] - starts[0][1]) / ((handoff_count - 1) * trace_clearance),
+        )
+        tangent_start = (-normal_start[1], normal_start[0])
+        if tangent_start[0] > 0.0:
+            tangent_start = (-tangent_start[0], -tangent_start[1])
+        via_sequence = tuple(
+            via_points[f"TURN{turn_number}_LEFT_DETOUR_VIA"]
+            for turn_number in range(1, handoff_count + 1)
+        )
+        center_end = (
+            sum(point[0] for point in via_sequence) / handoff_count,
+            sum(point[1] for point in via_sequence) / handoff_count,
+        )
+        normal_end = (
+            (via_sequence[-1][0] - via_sequence[0][0])
+            / ((handoff_count - 1) * via_spacing),
+            (via_sequence[-1][1] - via_sequence[0][1])
+            / ((handoff_count - 1) * via_spacing),
+        )
+        tangent_end = (-normal_end[1], normal_end[0])
+        if tangent_end[0] > 0.0:
+            tangent_end = (-tangent_end[0], -tangent_end[1])
+        control_length = abs(center_end[0] - center_start[0]) * 0.45
+        control_1 = (
+            center_start[0] + (tangent_start[0] * control_length),
+            center_start[1] + (tangent_start[1] * control_length),
+        )
+        control_2 = (
+            center_end[0] - (tangent_end[0] * control_length),
+            center_end[1] - (tangent_end[1] * control_length),
+        )
+        sample_count = (
+            max(32, cfg["secondary_curve_samples_per_cycle"] // 4)
+            if sample_count_override is None
+            else sample_count_override
+        )
+        route_points: list[list[Point]] = [[] for _ in starts]
+
+        for sample_index in range(sample_count + 1):
+            fraction = sample_index / sample_count
+            inverse = 1.0 - fraction
+            center = (
+                (inverse ** 3 * center_start[0])
+                + (3.0 * inverse * inverse * fraction * control_1[0])
+                + (3.0 * inverse * fraction * fraction * control_2[0])
+                + (fraction ** 3 * center_end[0]),
+                (inverse ** 3 * center_start[1])
+                + (3.0 * inverse * inverse * fraction * control_1[1])
+                + (3.0 * inverse * fraction * fraction * control_2[1])
+                + (fraction ** 3 * center_end[1]),
+            )
+            derivative = (
+                (3.0 * inverse * inverse * (control_1[0] - center_start[0]))
+                + (6.0 * inverse * fraction * (control_2[0] - control_1[0]))
+                + (3.0 * fraction * fraction * (center_end[0] - control_2[0])),
+                (3.0 * inverse * inverse * (control_1[1] - center_start[1]))
+                + (6.0 * inverse * fraction * (control_2[1] - control_1[1]))
+                + (3.0 * fraction * fraction * (center_end[1] - control_2[1])),
+            )
+            derivative_length = math.hypot(*derivative)
+            normal = (-derivative[1] / derivative_length, derivative[0] / derivative_length)
+            if (normal[0] * normal_start[0]) + (normal[1] * normal_start[1]) < 0.0:
+                normal = (-normal[0], -normal[1])
+            smooth_fraction = fraction * fraction * (3.0 - (2.0 * fraction))
+            spacing = trace_clearance + ((via_spacing - trace_clearance) * smooth_fraction)
+            for route_index, point_list in enumerate(route_points):
+                offset = (route_index - midpoint) * spacing
+                point_list.append(
+                    (center[0] + (offset * normal[0]), center[1] + (offset * normal[1]))
+                )
+
+        for route_index, point_list in enumerate(route_points):
+            point_list[0] = starts[route_index]
+            point_list[-1] = via_points[f"TURN{route_index + 1}_LEFT_DETOUR_VIA"]
+
+        return {
+            route_index: polyline_segments(tuple(point_list))
+            for route_index, point_list in enumerate(route_points)
+        }
+
+    target_starts = [
+        points[f"TURN{turn_number}_START"]
+        for turn_number in range(2, handoff_count + 2)
+    ]
+    inner_starts = [
+        points[f"TURN{turn_number}_LEFT_END"]
+        for turn_number in range(1, handoff_count + 1)
+    ]
+    half_span = secondary_stroke_length(cfg) / 2.0
+    target_anchor_paths = tuple(
+        secondary_curve_segments(
+            cfg,
+            dimensions,
+            points[f"TURN{turn_number}_START"],
+            points[f"TURN{turn_number}_LEFT_OUTER"],
+            -1.0,
+            outer_offsets[turn_number - 1],
+            station_start_x=-half_span,
+            station_end_x=points[f"TURN{turn_number}_LEFT_OUTER"][0],
+            mirror_phase_sign=False,
+            amplitude_override=amplitude_override,
+        )
+        for turn_number in range(1, handoff_count + 2)
+    )
+    inner_anchor_paths = tuple(
+        secondary_curve_segments(
+            cfg,
+            dimensions,
+            points[f"TURN{turn_number}_REV_LEFT_OUTER"],
+            points[f"TURN{turn_number}_LEFT_END"],
+            1.0,
+            outer_offsets[turn_number - 1],
+            station_start_x=points[f"TURN{turn_number}_REV_LEFT_OUTER"][0],
+            station_end_x=-half_span,
+            mirror_phase_sign=False,
+            amplitude_override=amplitude_override,
+        )
+        for turn_number in range(1, handoff_count + 2)
+    )
+
+    def rack_points(center_x: float, x_step: float) -> dict[str, Point]:
+        y_step = math.sqrt((via_spacing * via_spacing) - (x_step * x_step))
+        midpoint = (handoff_count - 1) / 2.0
+        return {
+            f"TURN{turn_number}_LEFT_DETOUR_VIA": (
+                center_x + ((turn_number - 1 - midpoint) * x_step),
+                (turn_number - 1 - midpoint) * y_step,
+            )
+            for turn_number in range(1, handoff_count + 1)
+        }
+
+    def routes_clear_candidate(
+        via_points: dict[str, Point],
+        target_routes: dict[int, tuple[Segment, ...]],
+        inner_routes: dict[int, tuple[Segment, ...]],
+    ) -> bool:
+        route_groups = (
+            (target_routes, target_anchor_paths, 1),
+            (inner_routes, inner_anchor_paths, 0),
+        )
+        for routes, anchor_paths, own_offset in route_groups:
+            for route_index, route in routes.items():
+                for path_index, path in enumerate(anchor_paths):
+                    if path_index == route_index + own_offset:
+                        continue
+                    if (
+                        path_to_path_distance(route, path)
+                        + ROUTING_POLYGONAL_TOLERANCE_MM
+                        < trace_clearance
+                    ):
+                        return False
+            for first_index, first in routes.items():
+                for second_index, second in routes.items():
+                    if first_index >= second_index:
+                        continue
+                    if (
+                        path_to_path_distance(first, second)
+                        + ROUTING_POLYGONAL_TOLERANCE_MM
+                        < trace_clearance
+                    ):
+                        return False
+        vias = tuple(via_points.values())
+        for via in vias:
+            for path in target_anchor_paths + inner_anchor_paths:
+                if (
+                    min(point_to_segment_distance(via, segment) for segment in path)
+                    + ROUTING_POLYGONAL_TOLERANCE_MM
+                    < via_to_trace_clearance(cfg)
+                ):
+                    return False
+        for route_index, route in (*target_routes.items(), *inner_routes.items()):
+            own_via = vias[route_index]
+            for via in vias:
+                if via == own_via:
+                    continue
+                if (
+                    min(point_to_segment_distance(via, segment) for segment in route)
+                    + ROUTING_POLYGONAL_TOLERANCE_MM
+                    < via_to_trace_clearance(cfg)
+                ):
+                    return False
+        return True
+
+    # A centered 3-pitch vertical rack is the conservative fallback. A compact
+    # 2.5-pitch rack and diagonally staggered variants are evaluated when they
+    # satisfy the complete local trace/via clearance check.
+    rack_candidates = (
+        (3.0, 0.0),
+        (2.5, 0.0),
+        (2.5, -0.25),
+        (2.5, 0.25),
+        (2.5, -0.50),
+        (2.5, 0.50),
+    )
+    best_plan: tuple[float, dict[str, Point]] | None = None
+    for center_pitch, step_pitch in rack_candidates:
+        via_points = rack_points(
+            source_edge_x - (center_pitch * via_spacing),
+            step_pitch * via_spacing,
+        )
+        target_routes = bundled_routes(target_starts, -1.0, via_points, 16)
+        inner_routes = bundled_routes(inner_starts, 1.0, via_points, 16)
+        if not routes_clear_candidate(via_points, target_routes, inner_routes):
+            continue
+        score = sum(
+            distance(*segment)
+            for route in (*target_routes.values(), *inner_routes.values())
+            for segment in route
+        )
+        candidate = (score, via_points)
+        if best_plan is None or candidate[0] < best_plan[0]:
+            best_plan = candidate
+
+    if best_plan is None:
+        raise ValueError("CL2 left bundle turnaround could not satisfy configured clearance.")
+    _, via_points = best_plan
+    target_routes = bundled_routes(target_starts, -1.0, via_points)
+    inner_routes = bundled_routes(inner_starts, 1.0, via_points)
+    if not routes_clear_candidate(via_points, target_routes, inner_routes):
+        raise ValueError("CL2 left bundle turnaround lost clearance at render resolution.")
+    return via_points, target_routes, inner_routes
+
+
 def cl2_fixed_right_transition_geometry(
     points: dict[str, Point],
     turn_count: int,
@@ -1859,16 +2885,16 @@ def build_multiturn_cl2_layout(
         else:
             labels["end"] = f"TURN{turn_index + 1}_RETURN_START"
 
-        points[str(labels["start"])] = point_at_station_x(
-            secondary_rail_point(
-                cfg,
-                dimensions,
-                -half_span,
-                -1.0,
-                outer_offset,
-                amplitude_override=amplitude_override,
-            ),
+        # Preserve each rail's normal offset at the shared waveform station.
+        # Collapsing the x component here made adjacent starts slightly closer
+        # than trace_pitch and left no legal direction for the handoff to exit.
+        points[str(labels["start"])] = secondary_rail_point(
+            cfg,
+            dimensions,
             -half_span,
+            -1.0,
+            outer_offset,
+            amplitude_override=amplitude_override,
         )
 
         points[str(labels["left_outer"])] = point_at_station_x(
@@ -1977,49 +3003,71 @@ def build_multiturn_cl2_layout(
             ),
             reverse_left_column_x,
         )
-        points[str(labels["left_end"])] = point_at_station_x(
-            secondary_rail_point(
-                cfg,
-                dimensions,
-                -half_span,
-                1.0,
-                outer_offset,
-                amplitude_override=amplitude_override,
-            ),
+        points[str(labels["left_end"])] = secondary_rail_point(
+            cfg,
+            dimensions,
             -half_span,
+            1.0,
+            outer_offset,
+            amplitude_override=amplitude_override,
         )
 
         if turn_index < len(outer_offsets) - 1:
-            points[str(labels["end"])] = point_at_station_x(
-                secondary_rail_point(
-                    cfg,
-                    dimensions,
-                    -half_span,
-                    -1.0,
-                    outer_offsets[turn_index + 1],
-                    amplitude_override=amplitude_override,
-                ),
+            points[str(labels["end"])] = secondary_rail_point(
+                cfg,
+                dimensions,
                 -half_span,
+                -1.0,
+                outer_offsets[turn_index + 1],
+                amplitude_override=amplitude_override,
             )
         else:
             points[str(labels["end"])] = points[str(labels["left_end"])]
 
         turn_specs.append(labels)
 
-    points = {**points, **cl2_left_turnaround_via_points(cfg)}
-    points["B"] = (
-        terminal_x + abs(terminal_output_y - points["TURN1_START"][1]),
-        points["TURN1_START"][1],
+    left_via_points, left_target_routes, left_inner_routes = build_cl2_left_bundle_turnaround_plan(
+        cfg,
+        dimensions,
+        points,
+        outer_offsets,
+        amplitude_override,
     )
+    points = {**points, **left_via_points}
     return_start_label = str(turn_specs[-1]["end"])
-    points["ZO"] = (
-        terminal_x + abs(terminal_return_y - points[return_start_label][1]),
-        points[return_start_label][1],
-    )
+    # Both external CL2 traces meet the fanout at the same y=0 spine.  They
+    # occupy different receiver layers, so this deliberately creates a common
+    # route-out while leaving the local coil-side escapes independent.
+    # Keep the last fanout legs orthogonal.  The spine sits one via-to-trace
+    # clearance inside the terminal column, then continues to the common y=0
+    # CL2 convergence route.
+    fanout_spine_x = terminal_x + via_to_trace_clearance(cfg)
+    fanout_spine = (fanout_spine_x, 0.0)
+    points["A_FANOUT_JOG"] = (fanout_spine_x, terminal_output_y)
+    points["ZP_FANOUT_JOG"] = (fanout_spine_x, terminal_return_y)
+    points["B"] = fanout_spine
+    points["ZO"] = fanout_spine
+    local_left_detours = tuple(left_via_points.values())
+    if local_left_detours:
+        convergence_x = min(point[0] for point in local_left_detours) - via_to_trace_clearance(cfg)
+    else:
+        convergence_x = min(
+            points["TURN1_START"][0],
+            points[return_start_label][0],
+        ) - trace_pitch(cfg)
+    points["CL2_FANOUT_CONVERGENCE"] = (convergence_x, 0.0)
     points["ZP"] = (terminal_x, terminal_return_y)
 
     if fanout_direction(cfg) > 0:
         points = mirror_points_horizontally(points)
+        left_target_routes = {
+            handoff_index: mirror_segments_horizontally(route)
+            for handoff_index, route in left_target_routes.items()
+        }
+        left_inner_routes = {
+            handoff_index: mirror_segments_horizontally(route)
+            for handoff_index, route in left_inner_routes.items()
+        }
 
     primary_geometry = primary_geometry or build_primary_geometry(cfg)
     primary_segments = tuple(
@@ -2035,10 +3083,7 @@ def build_multiturn_cl2_layout(
     )
     points = {**points, **turnaround_plan.via_points}
 
-    target_segments: list[Segment] = [
-        (points["A"], points["B"]),
-        (points["B"], points["TURN1_START"]),
-    ]
+    target_segments: list[Segment] = []
     inner_segments: list[Segment] = []
     target_forward_paths: list[tuple[Segment, ...]] = []
     target_reverse_paths: list[tuple[Segment, ...]] = []
@@ -2163,8 +3208,12 @@ def build_multiturn_cl2_layout(
 
         if "left_detour" in spec:
             left_detour = str(spec["left_detour"])
-            inner_segments.append((points[left_end], points[left_detour]))
-            target_segments.append((points[left_detour], points[end_label]))
+            handoff_index = int(left_detour.split("_")[0].removeprefix("TURN")) - 1
+            inner_segments.extend(left_inner_routes[handoff_index])
+            target_segments.extend(
+                (end, start)
+                for start, end in reversed(left_target_routes[handoff_index])
+            )
             via_labels.extend(
                 (
                     left_upper_via,
@@ -2186,8 +3235,55 @@ def build_multiturn_cl2_layout(
                 )
             )
 
-    inner_segments.append((points[return_start_label], points["ZO"]))
-    inner_segments.append((points["ZO"], points["ZP"]))
+    # The first target rail and final inner rail cannot take the former direct
+    # escape without crossing the newly packed left turnaround.  Route each
+    # around the outside of its own layer's bundle, then merge both at y=0.
+    target_connected_path = set(target_forward_paths[0])
+    inner_connected_path = set(inner_reverse_paths[-1])
+    detour_vias = tuple(
+        points[label]
+        for label in via_labels
+        if label not in ("A", "ZP")
+    )
+    left_detour_stack = tuple(
+        points[f"TURN{turn_number}_LEFT_DETOUR_VIA"]
+        for turn_number in range(1, cfg["number_of_secondary_turns"])
+    )
+    convergence = points["CL2_FANOUT_CONVERGENCE"]
+    target_escape = route_cl2_fanout_wrap(
+        cfg,
+        convergence,
+        points["TURN1_START"],
+        left_detour_stack,
+        -1.0,
+        fanout_direction(cfg),
+        tuple(segment for segment in target_segments if segment not in target_connected_path),
+        detour_vias,
+    )
+    return_escape = route_cl2_fanout_wrap(
+        cfg,
+        convergence,
+        points[return_start_label],
+        left_detour_stack,
+        1.0,
+        fanout_direction(cfg),
+        tuple(segment for segment in inner_segments if segment not in inner_connected_path),
+        detour_vias,
+    )
+    entry_escape_path = (
+        (points["A"], points["A_FANOUT_JOG"]),
+        (points["A_FANOUT_JOG"], points["B"]),
+        (points["B"], convergence),
+    ) + target_escape
+    return_escape_path = tuple(
+        (end, start) for start, end in reversed(return_escape)
+    ) + (
+        (convergence, points["ZO"]),
+        (points["ZO"], points["ZP_FANOUT_JOG"]),
+        (points["ZP_FANOUT_JOG"], points["ZP"]),
+    )
+    target_segments[0:0] = entry_escape_path
+    inner_segments.extend(return_escape_path)
     via_labels.append("ZP")
 
     return SecondaryLayoutPlan(
@@ -2199,6 +3295,16 @@ def build_multiturn_cl2_layout(
         target_reverse_paths=tuple(target_reverse_paths),
         inner_forward_paths=tuple(inner_forward_paths),
         inner_reverse_paths=tuple(inner_reverse_paths),
+        left_target_handoff_paths=tuple(
+            left_target_routes[handoff_index]
+            for handoff_index in sorted(left_target_routes)
+        ),
+        left_inner_handoff_paths=tuple(
+            left_inner_routes[handoff_index]
+            for handoff_index in sorted(left_inner_routes)
+        ),
+        entry_escape_path=entry_escape_path,
+        return_escape_path=return_escape_path,
     )
 
 
@@ -2263,6 +3369,101 @@ def validate_multiturn_cl2_clearance(
                     "CL2 parallel sinusoidal traces violate configured spacing: "
                     f"minimum centerline distance is {actual_spacing:.6f} mm, "
                     f"required pitch is {pitch:.6f} mm."
+                )
+
+    for handoff_index, route in enumerate(layout.left_target_handoff_paths):
+        for path_index, path in enumerate(layout.target_forward_paths):
+            if path_index == handoff_index + 1:
+                continue
+            actual_spacing = path_to_path_distance(route, path)
+            if actual_spacing + ROUTING_POLYGONAL_TOLERANCE_MM < pitch:
+                raise ValueError(
+                    "CL2 left target handoff crowds a non-connected turn: "
+                    f"minimum centerline distance is {actual_spacing:.6f} mm."
+                )
+    for handoff_index, route in enumerate(layout.left_inner_handoff_paths):
+        for path_index, path in enumerate(layout.inner_reverse_paths):
+            if path_index == handoff_index:
+                continue
+            actual_spacing = path_to_path_distance(route, path)
+            if actual_spacing + ROUTING_POLYGONAL_TOLERANCE_MM < pitch:
+                raise ValueError(
+                    "CL2 left inner handoff crowds a non-connected turn: "
+                    f"minimum centerline distance is {actual_spacing:.6f} mm."
+                )
+    for routes, layer_name in (
+        (layout.left_target_handoff_paths, "target"),
+        (layout.left_inner_handoff_paths, "inner"),
+    ):
+        for first_index, first in enumerate(routes):
+            for second in routes[first_index + 1:]:
+                actual_spacing = path_to_path_distance(first, second)
+                if actual_spacing + ROUTING_POLYGONAL_TOLERANCE_MM < pitch:
+                    raise ValueError(
+                        f"CL2 left {layer_name} handoff paths violate trace spacing: "
+                        f"minimum centerline distance is {actual_spacing:.6f} mm."
+                    )
+
+    def validate_fanout_escape(
+        route: tuple[Segment, ...],
+        layer_segments: tuple[Segment, ...],
+        connected_path: tuple[Segment, ...],
+        layer_name: str,
+    ) -> None:
+        obstacle_segments = tuple(
+            segment
+            for segment in layer_segments
+            if segment not in route and segment not in connected_path
+        )
+        for segment in route:
+            if any(
+                segment_to_segment_distance(segment, obstacle)
+                + ROUTING_POLYGONAL_TOLERANCE_MM
+                < pitch
+                for obstacle in obstacle_segments
+            ):
+                raise ValueError(
+                    f"CL2 {layer_name} fanout escape violates trace spacing."
+                )
+            if any(
+                point_to_segment_distance(layout.points[via_label], segment)
+                + ROUTING_POLYGONAL_TOLERANCE_MM
+                < via_to_trace_clearance(cfg)
+                for via_label in layout.via_labels
+                if via_label not in ("A", "ZP")
+            ):
+                raise ValueError(
+                    f"CL2 {layer_name} fanout escape crowds a via."
+                )
+
+    validate_fanout_escape(
+        layout.entry_escape_path,
+        layout.target_segments,
+        layout.target_forward_paths[0],
+        "entry",
+    )
+    validate_fanout_escape(
+        layout.return_escape_path,
+        layout.inner_segments,
+        layout.inner_reverse_paths[-1],
+        "return",
+    )
+
+    left_routes = layout.left_target_handoff_paths + layout.left_inner_handoff_paths
+    for route_index, route in enumerate(left_routes):
+        own_turn = (
+            route_index % max(len(layout.left_target_handoff_paths), 1)
+        ) + 1
+        own_via = layout.points[f"TURN{own_turn}_LEFT_DETOUR_VIA"]
+        for via_label in layout.via_labels:
+            via = layout.points[via_label]
+            if via == own_via:
+                continue
+            minimum_distance = min(point_to_segment_distance(via, segment) for segment in route)
+            if minimum_distance + ROUTING_POLYGONAL_TOLERANCE_MM < via_to_trace_clearance(cfg):
+                raise ValueError(
+                    f"CL2 left handoff route crowds via {via_label}: "
+                    f"minimum centerline distance is {minimum_distance:.6f} mm."
                 )
 
     turnaround_violations = cl2_right_turnaround_clearance_violations(
@@ -3059,7 +4260,9 @@ def build_multiturn_cl1_layout(
 
     points["ZK"] = (left_x, entrance_y - via_clearance)
     points["ZL"] = (left_x - via_clearance, entrance_y)
-    points["ZM"] = (terminal_x + abs(return_terminal_y - entrance_y), entrance_y)
+    fanout_jog_x = terminal_x + via_clearance
+    points["ZM"] = (fanout_jog_x, entrance_y)
+    points["ZN_JOG"] = (fanout_jog_x, return_terminal_y)
     points["ZN"] = (terminal_x, return_terminal_y)
 
     if fanout_direction(cfg) > 0:
@@ -3200,7 +4403,8 @@ def build_multiturn_cl1_layout(
     return_start_label = str(turn_specs[-1]["end"])
     inner_segments.append((points[return_start_label], points["ZK"]))
     inner_segments.append((points["ZL"], points["ZM"]))
-    inner_segments.append((points["ZM"], points["ZN"]))
+    inner_segments.append((points["ZM"], points["ZN_JOG"]))
+    inner_segments.append((points["ZN_JOG"], points["ZN"]))
     via_labels.append("ZN")
 
     return CL1LayoutPlan(
