@@ -272,6 +272,36 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                             generator.terminal_pad_pitch(cfg),
                         )
 
+    def test_transition_vias_follow_the_tighter_receiver_or_primary_envelope(self) -> None:
+        cfg = generator.build_config({"number_of_secondary_turns": 5})
+        dimensions = generator.calculate_dimensions(cfg)
+        primary = generator.build_primary_geometry(cfg)
+        cl2 = generator.build_cl2_geometry(cfg, primary)
+        cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+        assert cl2 is not None and cl1 is not None
+
+        clearance = generator.osc1_via_trace_clearance(cfg)
+        primary_upper = -generator.primary_inner_half_height(cfg, dimensions) + clearance
+        for coil, labels in (
+            (cl2, tuple(f"TURN{turn}_LEFT_UPPER_VIA" for turn in range(1, 6))),
+            (cl1, tuple(f"TURN{turn}_FWD_MID_VIA" for turn in range(1, 6))),
+        ):
+            upper = tuple(coil.points[label][1] for label in labels)
+            self.assertAlmostEqual(upper[0], upper[4], places=4)
+            self.assertAlmostEqual(upper[1], upper[3], places=4)
+            # The middle transition has no local receiver obstacle, so it
+            # remains at the primary-derived boundary.  Its neighbors move
+            # only enough to clear active local rail spans, not full cycles.
+            self.assertAlmostEqual(upper[2], primary_upper, places=4)
+            self.assertLess(upper[1], upper[0])
+            self.assertLess(upper[2], upper[1])
+
+        self.assertAlmostEqual(
+            cl2.points["TURN1_RIGHT_LOWER_VIA"][1],
+            -cl2.points["TURN1_LEFT_UPPER_VIA"][1],
+            places=4,
+        )
+
     def test_receiver_ground_escape_rows_stay_fixed_when_terminal_order_changes(self) -> None:
         cfg = generator.build_config()
         primary = generator.build_primary_geometry(cfg)

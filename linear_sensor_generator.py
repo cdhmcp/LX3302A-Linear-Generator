@@ -976,6 +976,143 @@ def secondary_rail_point(
     )
 
 
+def receiver_transition_via_y(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    station_x: float,
+    phase_sign: float,
+    rail_offsets: tuple[float, ...],
+    *,
+    upper: bool,
+    connected_rail_offsets: tuple[float, ...] = (),
+    rail_spans: tuple[tuple[float, float, float], ...] | None = None,
+    phase_offset_radians: float = 0.0,
+    amplitude_override: float | None = None,
+) -> float:
+    """Return a transition-via Y that clears both primary and receiver rails.
+
+    Transition vias live inside the primary winding, but a receiver rail can
+    extend farther toward the sensor center than the innermost primary turn.
+    The via may overlap the two receiver rails it intentionally joins.  All
+    other receiver rails remain obstacles and need normal via-to-trace
+    clearance.  Searching those non-connected curves at the actual transition
+    column produces the least-inward legal location.  The primary boundary
+    always retains its normal via-to-trace clearance.
+    """
+    clearance = osc1_via_trace_clearance(cfg)
+    inner_primary_y = primary_inner_half_height(cfg, dimensions)
+    obstacle_offsets = tuple(
+        rail_offset
+        for rail_offset in rail_offsets
+        if not any(
+            math.isclose(rail_offset, connected_offset, abs_tol=GEOMETRY_TOLERANCE_MM)
+            for connected_offset in connected_rail_offsets
+        )
+    )
+    connected_y_values = tuple(
+        secondary_rail_point(
+            cfg,
+            dimensions,
+            station_x,
+            phase_sign,
+            rail_offset,
+            phase_offset_radians,
+            amplitude_override,
+        )[1]
+        for rail_offset in connected_rail_offsets
+    )
+    if upper:
+        primary_boundary = -inner_primary_y + clearance
+        connected_upper = tuple(y for y in connected_y_values if y < 0.0)
+        starting_boundary = max((primary_boundary, *connected_upper))
+    else:
+        primary_boundary = inner_primary_y - clearance
+        connected_lower = tuple(y for y in connected_y_values if y > 0.0)
+        starting_boundary = min((primary_boundary, *connected_lower))
+
+    if not obstacle_offsets:
+        return starting_boundary
+
+    half_span = secondary_stroke_length(cfg) / 2.0
+    obstacle_segments: list[Segment] = []
+    obstacle_spans = (
+        rail_spans
+        if rail_spans is not None
+        else tuple((rail_offset, -half_span, half_span) for rail_offset in obstacle_offsets)
+    )
+    for rail_offset, station_start_x, station_end_x in obstacle_spans:
+        if rail_offset not in obstacle_offsets:
+            continue
+        start = secondary_rail_point(
+            cfg,
+            dimensions,
+            station_start_x,
+            phase_sign,
+            rail_offset,
+            phase_offset_radians,
+            amplitude_override,
+        )
+        end = secondary_rail_point(
+            cfg,
+            dimensions,
+            station_end_x,
+            phase_sign,
+            rail_offset,
+            phase_offset_radians,
+            amplitude_override,
+        )
+        obstacle_segments.extend(
+            secondary_curve_segments(
+                cfg,
+                dimensions,
+                start,
+                end,
+                phase_sign,
+                rail_offset,
+                station_start_x=station_start_x,
+                station_end_x=station_end_x,
+                phase_offset_radians=phase_offset_radians,
+                mirror_phase_sign=False,
+                amplitude_override=amplitude_override,
+            )
+        )
+
+    def clears_receiver(via_y: float) -> bool:
+        return all(
+            point_to_segment_distance((station_x, via_y), segment)
+            + ROUTING_POLYGONAL_TOLERANCE_MM
+            >= clearance
+            for segment in obstacle_segments
+        )
+
+    if upper:
+        if clears_receiver(starting_boundary):
+            return starting_boundary
+        inward_boundary = 0.0
+        if not clears_receiver(inward_boundary):
+            raise ValueError("Receiver upper transition via cannot clear non-connected rails.")
+        for _ in range(24):
+            midpoint = (starting_boundary + inward_boundary) / 2.0
+            if clears_receiver(midpoint):
+                inward_boundary = midpoint
+            else:
+                starting_boundary = midpoint
+        return inward_boundary
+
+    if clears_receiver(starting_boundary):
+        return starting_boundary
+    inward_boundary = 0.0
+    if not clears_receiver(inward_boundary):
+        raise ValueError("Receiver lower transition via cannot clear non-connected rails.")
+    for _ in range(24):
+        midpoint = (starting_boundary + inward_boundary) / 2.0
+        if clears_receiver(midpoint):
+            inward_boundary = midpoint
+        else:
+            starting_boundary = midpoint
+    return inward_boundary
+
+
 def secondary_curve_segments(
     cfg: dict,
     dimensions: SensorDimensions,
@@ -2836,13 +2973,34 @@ def build_multiturn_cl2_layout(
     outer_offsets = secondary_turn_offsets(cfg)
     quarter_shifts = cl2_quarter_column_shifts(cfg)
     amplitude_override = secondary_wave_amplitude_for_offsets(dimensions, outer_offsets)
-    inner_primary_y = primary_inner_half_height(cfg, dimensions)
-    primary_via_clearance = osc1_via_trace_clearance(cfg)
-    upper_via_y = -(inner_primary_y - primary_via_clearance)
-    lower_via_y = -upper_via_y
     terminal_x = -((dimensions.primary_length_mm / 2.0) + cfg["terminal_escape_length_mm"])
     terminal_output_y = terminal_row_y(cfg, "CL2")
     terminal_return_y = terminal_row_y(cfg, "CL2-GND")
+    negative_rail_spans: list[tuple[float, float, float]] = []
+    positive_rail_spans: list[tuple[float, float, float]] = []
+    for turn_index, outer_offset in enumerate(outer_offsets):
+        inner_offset = outer_offsets[len(outer_offsets) - 1 - turn_index]
+        shift = quarter_shifts[turn_index]
+        left_column_x = -quarter_span + shift
+        right_column_x = quarter_span + shift
+        reverse_right_column_x = quarter_span - shift
+        reverse_left_column_x = -quarter_span - shift
+        # An inner rail begins at its own transition column; modelling it as a
+        # full-span curve would create false obstacles for neighboring vias.
+        negative_rail_spans.extend(
+            (
+                (outer_offset, -half_span, left_column_x),
+                (inner_offset, left_column_x, right_column_x),
+                (outer_offset, right_column_x, half_span),
+            )
+        )
+        positive_rail_spans.extend(
+            (
+                (outer_offset, -half_span, reverse_left_column_x),
+                (inner_offset, reverse_left_column_x, reverse_right_column_x),
+                (outer_offset, reverse_right_column_x, half_span),
+            )
+        )
 
     points: dict[str, Point] = {
         "A": (terminal_x, terminal_output_y),
@@ -2908,7 +3066,20 @@ def build_multiturn_cl2_layout(
             ),
             left_column_x,
         )
-        points[str(labels["left_upper_via"])] = (left_column_x, upper_via_y)
+        points[str(labels["left_upper_via"])] = (
+            left_column_x,
+            receiver_transition_via_y(
+                cfg,
+                dimensions,
+                left_column_x,
+                -1.0,
+                outer_offsets,
+                upper=True,
+                connected_rail_offsets=(outer_offset, inner_offset),
+                rail_spans=tuple(negative_rail_spans),
+                amplitude_override=amplitude_override,
+            ),
+        )
         points[str(labels["left_inner"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -2931,7 +3102,20 @@ def build_multiturn_cl2_layout(
             ),
             right_column_x,
         )
-        points[str(labels["right_lower_via"])] = (right_column_x, lower_via_y)
+        points[str(labels["right_lower_via"])] = (
+            right_column_x,
+            receiver_transition_via_y(
+                cfg,
+                dimensions,
+                right_column_x,
+                -1.0,
+                outer_offsets,
+                upper=False,
+                connected_rail_offsets=(outer_offset, inner_offset),
+                rail_spans=tuple(negative_rail_spans),
+                amplitude_override=amplitude_override,
+            ),
+        )
         points[str(labels["right_outer"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -2968,7 +3152,20 @@ def build_multiturn_cl2_layout(
             ),
             reverse_right_column_x,
         )
-        points[str(labels["reverse_right_upper_via"])] = (reverse_right_column_x, upper_via_y)
+        points[str(labels["reverse_right_upper_via"])] = (
+            reverse_right_column_x,
+            receiver_transition_via_y(
+                cfg,
+                dimensions,
+                reverse_right_column_x,
+                1.0,
+                outer_offsets,
+                upper=True,
+                connected_rail_offsets=(outer_offset, inner_offset),
+                rail_spans=tuple(positive_rail_spans),
+                amplitude_override=amplitude_override,
+            ),
+        )
         points[str(labels["reverse_target_start"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -2991,7 +3188,20 @@ def build_multiturn_cl2_layout(
             ),
             reverse_left_column_x,
         )
-        points[str(labels["reverse_left_lower_via"])] = (reverse_left_column_x, lower_via_y)
+        points[str(labels["reverse_left_lower_via"])] = (
+            reverse_left_column_x,
+            receiver_transition_via_y(
+                cfg,
+                dimensions,
+                reverse_left_column_x,
+                1.0,
+                outer_offsets,
+                upper=False,
+                connected_rail_offsets=(outer_offset, inner_offset),
+                rail_spans=tuple(positive_rail_spans),
+                amplitude_override=amplitude_override,
+            ),
+        )
         points[str(labels["reverse_left_outer"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -4072,16 +4282,71 @@ def build_multiturn_cl1_layout(
     entrance_y = terminal_row_y(cfg, "CL1")
     return_terminal_y = terminal_row_y(cfg, "CL1-GND")
     via_clearance = osc1_via_trace_clearance(cfg)
-    upper_via_y = -(primary_inner_half_height(cfg, dimensions) - via_clearance)
-    lower_via_y = -upper_via_y
     turn_offsets = cl1_turn_offsets(cfg)
     midpoint_columns = cl1_midpoint_columns(cfg)
     amplitude_override = secondary_wave_amplitude_for_offsets(dimensions, turn_offsets)
+    positive_rail_spans: list[tuple[float, float, float]] = []
+    negative_rail_spans: list[tuple[float, float, float]] = []
+    for turn_index, outer_offset in enumerate(turn_offsets):
+        reverse_index = len(turn_offsets) - 1 - turn_index
+        inner_offset = turn_offsets[reverse_index]
+        forward_mid_x = midpoint_columns[turn_index]
+        reverse_mid_x = midpoint_columns[reverse_index]
+        right_x = cl1_right_end_column(cfg, turn_index)
+        forward_start_x = (
+            left_x if turn_index == 0 else cl1_left_transition_column(cfg, turn_index - 1)
+        )
+        reverse_end_x = (
+            cl1_left_transition_column(cfg, turn_index)
+            if turn_index < len(turn_offsets) - 1
+            else left_x
+        )
+        positive_rail_spans.extend(
+            (
+                (outer_offset, forward_start_x, forward_mid_x),
+                (inner_offset, forward_mid_x, right_x),
+            )
+        )
+        negative_rail_spans.extend(
+            (
+                (inner_offset, right_x, reverse_mid_x),
+                (outer_offset, reverse_mid_x, reverse_end_x),
+            )
+        )
+
+    def transition_via_y(
+        station_x: float,
+        phase_sign: float,
+        *,
+        upper: bool,
+        connected_offsets: tuple[float, ...],
+    ) -> float:
+        return receiver_transition_via_y(
+            cfg,
+            dimensions,
+            station_x,
+            phase_sign,
+            turn_offsets,
+            upper=upper,
+            connected_rail_offsets=connected_offsets,
+            rail_spans=tuple(positive_rail_spans if phase_sign > 0.0 else negative_rail_spans),
+            phase_offset_radians=phase_offset,
+            amplitude_override=amplitude_override,
+        )
+
     points: dict[str, Point] = {
         "A": (terminal_x, entrance_y),
         "B": (terminal_x + cfg["terminal_escape_length_mm"], entrance_y),
         "C": (left_x, entrance_y),
-        "D": (left_x, lower_via_y),
+        "D": (
+            left_x,
+            transition_via_y(
+                left_x,
+                1.0,
+                upper=False,
+                connected_offsets=(turn_offsets[0],),
+            ),
+        ),
         "TURN1_START": point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -4142,7 +4407,15 @@ def build_multiturn_cl1_layout(
             ),
             forward_mid_x,
         )
-        points[str(labels["forward_mid_via"])] = (forward_mid_x, upper_via_y)
+        points[str(labels["forward_mid_via"])] = (
+            forward_mid_x,
+            transition_via_y(
+                forward_mid_x,
+                1.0,
+                upper=True,
+                connected_offsets=(outer_offset, inner_offset),
+            ),
+        )
         points[str(labels["forward_inner_start"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -4194,7 +4467,15 @@ def build_multiturn_cl1_layout(
             ),
             reverse_mid_x,
         )
-        points[str(labels["reverse_mid_via"])] = (reverse_mid_x, lower_via_y)
+        points[str(labels["reverse_mid_via"])] = (
+            reverse_mid_x,
+            transition_via_y(
+                reverse_mid_x,
+                -1.0,
+                upper=False,
+                connected_offsets=(outer_offset, inner_offset),
+            ),
+        )
         points[str(labels["reverse_inner_start"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -4221,8 +4502,24 @@ def build_multiturn_cl1_layout(
                 ),
                 transition_x,
             )
-            points[str(labels["left_transition_upper_via"])] = (transition_x, upper_via_y)
-            points[str(labels["left_transition_lower_via"])] = (transition_x, lower_via_y)
+            points[str(labels["left_transition_upper_via"])] = (
+                transition_x,
+                transition_via_y(
+                    transition_x,
+                    -1.0,
+                    upper=True,
+                    connected_offsets=(outer_offset,),
+                ),
+            )
+            points[str(labels["left_transition_lower_via"])] = (
+                transition_x,
+                transition_via_y(
+                    transition_x,
+                    1.0,
+                    upper=False,
+                    connected_offsets=(turn_offsets[turn_index + 1],),
+                ),
+            )
             points[str(labels["end"])] = point_at_station_x(
                 secondary_rail_point(
                     cfg,
