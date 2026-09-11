@@ -1013,6 +1013,80 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                     self.assertIn((lower_via, next_start), cl1.target_segments)
                     self.assertNotIn(next_start, inner_points)
 
+    def test_cl1_right_transition_via_labels_match_physical_side(self) -> None:
+        for turns in range(1, 6):
+            with self.subTest(turns=turns):
+                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                primary = generator.build_primary_geometry(cfg)
+                cl2 = generator.build_cl2_geometry(cfg, primary)
+                cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+                assert cl1 is not None
+
+                for turn in range(1, turns + 1):
+                    self.assertLess(cl1.points[f"TURN{turn}_RIGHT_UPPER_VIA"][1], 0.0)
+                    self.assertGreater(cl1.points[f"TURN{turn}_RIGHT_LOWER_VIA"][1], 0.0)
+
+    def test_three_turn_cl1_right_transition_uses_common_lower_rack(self) -> None:
+        cfg = generator.build_config({"number_of_secondary_turns": 3})
+        primary = generator.build_primary_geometry(cfg)
+        cl2 = generator.build_cl2_geometry(cfg, primary)
+        cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+        assert cl1 is not None
+
+        rack_x = generator.cl1_right_end_column(cfg, 0)
+        rack_top_y = generator.cl1_crossover_turn_half_height(
+            cfg, primary.dimensions, cl2, rack_x
+        )
+        via_spacing = generator.secondary_via_spacing(cfg)
+
+        for turn_index in range(3):
+            turn = turn_index + 1
+            reverse_index = 2 - turn_index
+            upper_via = cl1.points[f"TURN{turn}_RIGHT_UPPER_VIA"]
+            lower_via = cl1.points[f"TURN{turn}_RIGHT_LOWER_VIA"]
+            inner_entry_jog = cl1.points[f"TURN{turn}_RIGHT_INNER_ENTRY_JOG"]
+            crossover_jog = cl1.points[f"TURN{turn}_RIGHT_CROSSOVER_JOG"]
+            return_jog = cl1.points[f"TURN{turn}_RIGHT_RETURN_JOG"]
+            reverse_start = cl1.points[f"TURN{turn}_REV_START"]
+
+            self.assertAlmostEqual(upper_via[0], generator.cl1_right_end_column(cfg, turn_index))
+            self.assertLess(upper_via[1], 0.0)
+            self.assertEqual(lower_via, (rack_x, rack_top_y + (turn_index * via_spacing)))
+
+            expected_inner_end_x = generator.cl1_right_end_column(cfg, reverse_index)
+            self.assertEqual(return_jog, (upper_via[0], reverse_start[1]))
+            self.assertAlmostEqual(
+                reverse_start[0], generator.cl1_right_end_column(cfg, turn_index)
+            )
+
+            right_end = cl1.points[f"TURN{turn}_RIGHT_END"]
+            self.assertAlmostEqual(right_end[0], expected_inner_end_x)
+            self.assertEqual(inner_entry_jog, (right_end[0], lower_via[1]))
+            self.assertEqual(crossover_jog, (upper_via[0], lower_via[1]))
+            self.assertIn((right_end, inner_entry_jog), cl1.inner_segments)
+            if inner_entry_jog != lower_via:
+                self.assertIn((inner_entry_jog, lower_via), cl1.inner_segments)
+            if lower_via != crossover_jog:
+                self.assertIn((lower_via, crossover_jog), cl1.crossover_segments)
+            self.assertIn((crossover_jog, upper_via), cl1.crossover_segments)
+            self.assertIn((upper_via, return_jog), cl1.target_segments)
+            if return_jog != reverse_start:
+                self.assertIn((return_jog, reverse_start), cl1.target_segments)
+
+            reverse_mid_end = cl1.points[f"TURN{turn}_REV_MID_END"]
+            reverse_mid_via = cl1.points[f"TURN{turn}_REV_MID_VIA"]
+            reverse_inner_start = cl1.points[f"TURN{turn}_REV_INNER_START"]
+            self.assertIn((reverse_mid_end, reverse_mid_via), cl1.target_segments)
+            self.assertIn((reverse_mid_via, reverse_inner_start), cl1.inner_segments)
+            self.assertTrue(
+                any(segment[0] == reverse_start for segment in cl1.target_segments),
+                f"turn {turn} right return should begin on the target layer",
+            )
+            self.assertTrue(
+                any(segment[0] == reverse_inner_start for segment in cl1.inner_segments),
+                f"turn {turn} left return should begin on Inner.1",
+            )
+
     def test_multiturn_receivers_mirror_generated_points_on_bottom_right_fanout(self) -> None:
         left_cfg = generator.build_config(
             {"number_of_secondary_turns": 4, "target_side": "bottom", "fanout_side": "left"}

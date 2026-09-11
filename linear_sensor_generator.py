@@ -42,7 +42,7 @@ PROPERTIES = {
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
-    "number_of_secondary_turns": 5,     # valid range: 1..5
+    "number_of_secondary_turns": 3,     # valid range: 1..5
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Trace & Via constraints 
@@ -4285,6 +4285,11 @@ def build_multiturn_cl1_layout(
     turn_offsets = cl1_turn_offsets(cfg)
     midpoint_columns = cl1_midpoint_columns(cfg)
     amplitude_override = secondary_wave_amplitude_for_offsets(dimensions, turn_offsets)
+    use_three_turn_right_transition = len(turn_offsets) == 3
+    right_lower_rack_x = cl1_right_end_column(cfg, 0)
+    right_lower_rack_top_y = cl1_crossover_turn_half_height(
+        cfg, dimensions, cl2_geometry, right_lower_rack_x
+    )
     positive_rail_spans: list[tuple[float, float, float]] = []
     negative_rail_spans: list[tuple[float, float, float]] = []
     for turn_index, outer_offset in enumerate(turn_offsets):
@@ -4293,6 +4298,15 @@ def build_multiturn_cl1_layout(
         forward_mid_x = midpoint_columns[turn_index]
         reverse_mid_x = midpoint_columns[reverse_index]
         right_x = cl1_right_end_column(cfg, turn_index)
+        forward_end_x = (
+            cl1_right_end_column(cfg, reverse_index)
+            if use_three_turn_right_transition
+            else right_x
+        )
+        # The target-layer return sine always starts directly above its own
+        # upper via.  Only the Inner.1 forward-sine endpoint is reversed for
+        # the three-turn lower-rack handoff.
+        reverse_start_x = right_x
         forward_start_x = (
             left_x if turn_index == 0 else cl1_left_transition_column(cfg, turn_index - 1)
         )
@@ -4304,12 +4318,12 @@ def build_multiturn_cl1_layout(
         positive_rail_spans.extend(
             (
                 (outer_offset, forward_start_x, forward_mid_x),
-                (inner_offset, forward_mid_x, right_x),
+                (inner_offset, forward_mid_x, forward_end_x),
             )
         )
         negative_rail_spans.extend(
             (
-                (inner_offset, right_x, reverse_mid_x),
+                (inner_offset, reverse_start_x, reverse_mid_x),
                 (outer_offset, reverse_mid_x, reverse_end_x),
             )
         )
@@ -4371,6 +4385,12 @@ def build_multiturn_cl1_layout(
         forward_mid_x = midpoint_columns[turn_index]
         reverse_mid_x = midpoint_columns[reverse_index]
         right_x = cl1_right_end_column(cfg, turn_index)
+        forward_end_x = (
+            cl1_right_end_column(cfg, reverse_index)
+            if use_three_turn_right_transition
+            else right_x
+        )
+        reverse_start_x = right_x
 
         labels: dict[str, str | float] = {
             "outer_offset": outer_offset,
@@ -4387,6 +4407,10 @@ def build_multiturn_cl1_layout(
             "reverse_mid_via": f"TURN{turn_index + 1}_REV_MID_VIA",
             "reverse_inner_start": f"TURN{turn_index + 1}_REV_INNER_START",
         }
+        if use_three_turn_right_transition:
+            labels["right_inner_entry_jog"] = f"TURN{turn_index + 1}_RIGHT_INNER_ENTRY_JOG"
+            labels["right_crossover_jog"] = f"TURN{turn_index + 1}_RIGHT_CROSSOVER_JOG"
+            labels["right_return_jog"] = f"TURN{turn_index + 1}_RIGHT_RETURN_JOG"
         if turn_index < len(turn_offsets) - 1:
             labels["left_transition_end"] = f"TURN{turn_index + 1}_LEFT_TRANSITION_END"
             labels["left_transition_upper_via"] = f"TURN{turn_index + 1}_LEFT_TRANSITION_UPPER_VIA"
@@ -4432,29 +4456,43 @@ def build_multiturn_cl1_layout(
             secondary_rail_point(
                 cfg,
                 dimensions,
-                right_x,
+                forward_end_x,
                 1.0,
                 inner_offset,
                 phase_offset,
                 amplitude_override,
             ),
-            right_x,
+            forward_end_x,
         )
         half_height = cl1_crossover_turn_half_height(cfg, dimensions, cl2_geometry, right_x)
-        points[str(labels["right_upper_via"])] = (right_x, half_height)
-        points[str(labels["right_lower_via"])] = (right_x, -half_height)
+        points[str(labels["right_upper_via"])] = (right_x, -half_height)
+        lower_via_y = (
+            right_lower_rack_top_y + (turn_index * secondary_via_spacing(cfg))
+            if use_three_turn_right_transition
+            else half_height
+        )
+        lower_via_x = right_lower_rack_x if use_three_turn_right_transition else right_x
+        points[str(labels["right_lower_via"])] = (lower_via_x, lower_via_y)
+        if use_three_turn_right_transition:
+            points[str(labels["right_inner_entry_jog"])] = (forward_end_x, lower_via_y)
+            points[str(labels["right_crossover_jog"])] = (right_x, lower_via_y)
         points[str(labels["reverse_start"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
                 dimensions,
-                right_x,
+                reverse_start_x,
                 -1.0,
                 inner_offset,
                 phase_offset,
                 amplitude_override,
             ),
-            right_x,
+            reverse_start_x,
         )
+        if use_three_turn_right_transition:
+            points[str(labels["right_return_jog"])] = (
+                right_x,
+                points[str(labels["reverse_start"])][1],
+            )
         points[str(labels["reverse_mid_end"])] = point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -4632,11 +4670,40 @@ def build_multiturn_cl1_layout(
         )
         inner_segments.extend(inner_forward)
         inner_forward_paths.append(inner_forward)
-        inner_segments.append((points[right_end], points[right_upper_via]))
-        crossover_segments.append((points[right_upper_via], points[right_lower_via]))
-        target_segments.append((points[right_lower_via], points[reverse_start]))
+        if "right_crossover_jog" in spec:
+            right_inner_entry_jog = str(spec["right_inner_entry_jog"])
+            right_crossover_jog = str(spec["right_crossover_jog"])
+            right_return_jog = str(spec["right_return_jog"])
 
-        target_reverse = secondary_curve_segments(
+            # The right-side handoff remains Inner.1 -> In2 -> target.  The
+            # incoming Inner.1 sine reaches the common lower rack first; In2
+            # then crosses to the upper via in the turn's own column.
+            inner_segments.append((points[right_end], points[right_inner_entry_jog]))
+            if points[right_inner_entry_jog] != points[right_lower_via]:
+                inner_segments.append(
+                    (points[right_inner_entry_jog], points[right_lower_via])
+                )
+            if points[right_lower_via] != points[right_crossover_jog]:
+                crossover_segments.append(
+                    (points[right_lower_via], points[right_crossover_jog])
+                )
+            crossover_segments.append(
+                (points[right_crossover_jog], points[right_upper_via])
+            )
+
+            # The target-layer return entry reverses the upper-column order:
+            # T1 uses T3's column, T2 its own, and T3 (already at the outer
+            # column) takes the horizontal leg after its vertical exit from
+            # the upper via.
+            target_segments.append((points[right_upper_via], points[right_return_jog]))
+            if points[right_return_jog] != points[reverse_start]:
+                target_segments.append((points[right_return_jog], points[reverse_start]))
+        else:
+            inner_segments.append((points[right_end], points[right_lower_via]))
+            crossover_segments.append((points[right_lower_via], points[right_upper_via]))
+            target_segments.append((points[right_upper_via], points[reverse_start]))
+
+        return_right = secondary_curve_segments(
             cfg,
             dimensions,
             points[reverse_start],
@@ -4649,12 +4716,20 @@ def build_multiturn_cl1_layout(
             mirror_phase_sign=False,
             amplitude_override=amplitude_override,
         )
-        target_segments.extend(target_reverse)
-        target_reverse_paths.append(target_reverse)
-        target_segments.append((points[reverse_mid_end], points[reverse_mid_via]))
-        inner_segments.append((points[reverse_mid_via], points[reverse_inner_start]))
+        if "right_crossover_jog" in spec:
+            # Keep the return sinusoids on their established layers.  Only
+            # the via/jog topology differs for the three-turn right side.
+            target_segments.extend(return_right)
+            target_reverse_paths.append(return_right)
+            target_segments.append((points[reverse_mid_end], points[reverse_mid_via]))
+            inner_segments.append((points[reverse_mid_via], points[reverse_inner_start]))
+        else:
+            target_segments.extend(return_right)
+            target_reverse_paths.append(return_right)
+            target_segments.append((points[reverse_mid_end], points[reverse_mid_via]))
+            inner_segments.append((points[reverse_mid_via], points[reverse_inner_start]))
 
-        inner_reverse = secondary_curve_segments(
+        return_left = secondary_curve_segments(
             cfg,
             dimensions,
             points[reverse_inner_start],
@@ -4667,8 +4742,12 @@ def build_multiturn_cl1_layout(
             mirror_phase_sign=False,
             amplitude_override=amplitude_override,
         )
-        inner_segments.extend(inner_reverse)
-        inner_reverse_paths.append(inner_reverse)
+        if "right_crossover_jog" in spec:
+            inner_segments.extend(return_left)
+            inner_reverse_paths.append(return_left)
+        else:
+            inner_segments.extend(return_left)
+            inner_reverse_paths.append(return_left)
 
         if "left_transition_end" in spec:
             left_transition_end = str(spec["left_transition_end"])
@@ -4851,8 +4930,10 @@ def cl1_two_turn_legacy_alias_points(points: dict[str, Point]) -> dict[str, Poin
             "G": "TURN1_FWD_MID_VIA",
             "H": "TURN1_FWD_INNER_START",
             "I": "TURN1_RIGHT_END",
-            "K": "TURN1_RIGHT_UPPER_VIA",
-            "L": "TURN1_RIGHT_LOWER_VIA",
+            # Preserve the historical aliases' physical positions while the
+            # generalized labels describe the actual upper/lower side.
+            "K": "TURN1_RIGHT_LOWER_VIA",
+            "L": "TURN1_RIGHT_UPPER_VIA",
             "O": "TURN1_REV_START",
             "P": "TURN1_REV_MID_END",
             "Q": "TURN1_REV_MID_VIA",
@@ -4865,8 +4946,8 @@ def cl1_two_turn_legacy_alias_points(points: dict[str, Point]) -> dict[str, Poin
             "X": "TURN2_FWD_MID_VIA",
             "Y": "TURN2_FWD_INNER_START",
             "Z": "TURN2_RIGHT_END",
-            "ZB": "TURN2_RIGHT_UPPER_VIA",
-            "ZC": "TURN2_RIGHT_LOWER_VIA",
+            "ZB": "TURN2_RIGHT_LOWER_VIA",
+            "ZC": "TURN2_RIGHT_UPPER_VIA",
             "ZF": "TURN2_REV_START",
             "ZG": "TURN2_REV_MID_END",
             "ZH": "TURN2_REV_MID_VIA",
