@@ -129,7 +129,8 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         for (_, first), (_, second) in zip(terminals, terminals[1:]):
             self.assertAlmostEqual(generator.distance(first, second), expected_spacing)
         self.assertEqual(cl1.points["A"][1], cl1.points["B"][1])
-        self.assertEqual(cl1.points["B"][1], cl1.points["C"][1])
+        self.assertNotIn("C", cl1.points)
+        self.assertIn((cl1.points["B"], cl1.points["D"]), cl1.target_segments)
 
     def test_bottom_target_mirrors_primary_and_escape_layers(self) -> None:
         cfg = generator.build_config({"target_side": "bottom"})
@@ -441,7 +442,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 ):
                     generator.build_cl1_geometry(cfg, primary, cl2)
 
-    def test_two_turn_receivers_use_generalized_builders_but_keep_legacy_labels(self) -> None:
+    def test_two_turn_receivers_use_generalized_builders_and_keep_point_aliases(self) -> None:
         cfg = generator.build_config({"number_of_secondary_turns": 2})
         primary = generator.build_primary_geometry(cfg)
 
@@ -470,8 +471,10 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             self.assertIn(label, cl2.points)
         for label in ("E", "K", "L", "T", "U", "ZB", "ZC", "ZJ", "ZN"):
             self.assertIn(label, cl1.points)
+        self.assertNotIn("C", cl1.points)
         self.assertEqual(cl2.via_labels, generator.CL2_TWO_TURN_LEGACY_VIA_LABELS)
-        self.assertEqual(cl1.via_labels, generator.CL1_TWO_TURN_LEGACY_VIA_LABELS)
+        self.assertIn("TURN1_LEFT_UPPER_VIA", cl1.via_labels)
+        self.assertIn("TURN2_LEFT_LOWER_VIA", cl1.via_labels)
 
     def test_multiturn_cl2_columns_center_on_quarter_span_and_stay_inside_outer_envelope(self) -> None:
         for turns in (1, 3, 4, 5):
@@ -913,7 +916,10 @@ class LinearSensorGeneratorTests(unittest.TestCase):
     def test_multiturn_cl1_columns_center_on_midpoint_and_step_inward(self) -> None:
         for turns in (1, 3, 4, 5):
             with self.subTest(turns=turns):
-                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                overrides = {"number_of_secondary_turns": turns}
+                if turns >= 4:
+                    overrides["target_y_mm"] = 13.0 if turns == 5 else 12.0
+                cfg = generator.build_config(overrides)
                 dimensions = generator.calculate_dimensions(cfg)
                 primary = generator.build_primary_geometry(cfg)
                 cl2 = generator.build_cl2_geometry(cfg, primary)
@@ -921,17 +927,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 assert cl1 is not None
                 via_spacing = generator.secondary_via_spacing(cfg)
                 half_span = generator.secondary_stroke_length(cfg) / 2.0
-                centered_midpoints = [
-                    (index - ((turns - 1) / 2.0)) * via_spacing
-                    for index in range(turns)
-                ]
-                left_midpoints = [value for value in centered_midpoints if value < 0.0]
-                right_midpoints = [value for value in centered_midpoints if value > 0.0]
-                expected_midpoints: list[float] = []
-                for left, right in zip(left_midpoints, reversed(right_midpoints)):
-                    expected_midpoints.extend((left, right))
-                if turns % 2 == 1:
-                    expected_midpoints.append(0.0)
+                expected_midpoints = list(generator.cl1_midpoint_columns(cfg))
                 actual_midpoints = [
                     cl1.points[f"TURN{index + 1}_FWD_MID_END"][0]
                     for index in range(turns)
@@ -955,24 +951,23 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                     self.assertAlmostEqual(reverse, -forward)
                 for actual, expected in zip(actual_right_columns, expected_right_columns):
                     self.assertAlmostEqual(actual, expected)
-                if turns > 1:
-                    transition_base = (
-                        -half_span
-                        + (
-                            generator.secondary_stroke_length(cfg)
-                            * cfg["cl1_transition_column_fraction"]
-                        )
-                    )
-                    actual_transitions = [
-                        cl1.points[f"TURN{index + 1}_LEFT_TRANSITION_UPPER_VIA"][0]
-                        for index in range(turns - 1)
-                    ]
-                    expected_transitions = [
-                        transition_base + (index * via_spacing)
-                        for index in range(turns - 1)
-                    ]
-                    for actual, expected in zip(actual_transitions, expected_transitions):
-                        self.assertAlmostEqual(actual, expected)
+                expected_left_columns = [
+                    -half_span + (index * via_spacing)
+                    for index in range(turns)
+                ]
+                actual_left_lower_columns = [
+                    cl1.points[
+                        "D" if index == 0 else f"TURN{index + 1}_LEFT_LOWER_VIA"
+                    ][0]
+                    for index in range(turns)
+                ]
+                actual_left_upper_columns = [
+                    cl1.points[f"TURN{index + 1}_LEFT_UPPER_VIA"][0]
+                    for index in range(turns)
+                ]
+                for actual, expected in zip(actual_left_lower_columns, expected_left_columns):
+                    self.assertAlmostEqual(actual, expected)
+                self.assertEqual(actual_left_upper_columns, [-half_span] * turns)
                 self.assertLessEqual(
                     max(abs(point[1]) for point in cl1.points.values()),
                     (dimensions.secondary_width_mm / 2.0) + 0.01,
@@ -1016,7 +1011,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                     self.assertGreater(len(actual), 0)
                     self.assertLess(len(actual), len(all_segments))
 
-    def test_multiturn_cl1_left_transition_handoff_stays_off_inner_next_start(self) -> None:
+    def test_multiturn_cl1_left_transition_handoff_uses_flipped_via_groups(self) -> None:
         for turns in (3, 5):
             with self.subTest(turns=turns):
                 overrides = {"number_of_secondary_turns": turns}
@@ -1028,16 +1023,29 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
                 assert cl1 is not None
 
-                inner_points = {
-                    point
-                    for segment in cl1.inner_segments
-                    for point in segment
-                }
-                for turn_index in range(1, turns):
-                    next_start = cl1.points[f"TURN{turn_index + 1}_START"]
-                    lower_via = cl1.points[f"TURN{turn_index}_LEFT_TRANSITION_LOWER_VIA"]
-                    self.assertIn((lower_via, next_start), cl1.target_segments)
-                    self.assertNotIn(next_start, inner_points)
+                self.assertEqual(cl1.points["TURN1_LEFT_LOWER_VIA"], cl1.points["D"])
+                for turn_index in range(turns - 1):
+                    turn = turn_index + 1
+                    next_lower_via = cl1.points[f"TURN{turn + 1}_LEFT_LOWER_VIA"]
+                    upper_via = cl1.points[f"TURN{turn}_LEFT_UPPER_VIA"]
+                    crossover_jog = cl1.points[f"TURN{turn}_LEFT_CROSSOVER_JOG"]
+                    next_start = cl1.points[f"TURN{turn + 1}_START"]
+                    self.assertEqual(crossover_jog, (next_lower_via[0], upper_via[1]))
+                    if upper_via != crossover_jog:
+                        self.assertIn((upper_via, crossover_jog), cl1.crossover_segments)
+                    self.assertIn((crossover_jog, next_lower_via), cl1.crossover_segments)
+                    self.assertIn((next_lower_via, next_start), cl1.target_segments)
+
+                final_upper_via = cl1.points[f"TURN{turns}_LEFT_UPPER_VIA"]
+                final_escape_jog = cl1.points["LEFT_RETURN_ESCAPE_JOG"]
+                final_escape_via = cl1.points["LEFT_RETURN_ESCAPE_VIA"]
+                self.assertLess(final_escape_via[0], final_upper_via[0])
+                self.assertIn((final_upper_via, final_escape_jog), cl1.crossover_segments)
+                self.assertIn((final_escape_jog, final_escape_via), cl1.crossover_segments)
+                self.assertIn(
+                    (final_escape_via, cl1.points["LEFT_RETURN_FANOUT_JOG"]),
+                    cl1.inner_segments,
+                )
 
     def test_cl1_right_transition_via_labels_match_physical_side(self) -> None:
         for turns in range(1, 6):
@@ -1180,7 +1188,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
         ):
             self.assertAlmostEqual(right_cl2.points[name][0], -left_cl2.points[name][0])
             self.assertAlmostEqual(right_cl2.points[name][1], left_cl2.points[name][1])
-        for name in ("TURN1_START", "TURN2_FWD_MID_END", "TURN3_LEFT_TRANSITION_UPPER_VIA", "TURN4_RIGHT_UPPER_VIA", "ZN"):
+        for name in ("TURN1_START", "TURN2_FWD_MID_END", "TURN3_LEFT_UPPER_VIA", "TURN4_RIGHT_UPPER_VIA", "ZN"):
             self.assertAlmostEqual(right_cl1.points[name][0], -left_cl1.points[name][0])
             self.assertAlmostEqual(right_cl1.points[name][1], left_cl1.points[name][1])
 
