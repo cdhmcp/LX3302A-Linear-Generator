@@ -273,7 +273,7 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                         )
 
     def test_transition_vias_follow_the_tighter_receiver_or_primary_envelope(self) -> None:
-        cfg = generator.build_config({"number_of_secondary_turns": 5})
+        cfg = generator.build_config({"number_of_secondary_turns": 5, "target_y_mm": 13.0})
         dimensions = generator.calculate_dimensions(cfg)
         primary = generator.build_primary_geometry(cfg)
         cl2 = generator.build_cl2_geometry(cfg, primary)
@@ -413,16 +413,33 @@ class LinearSensorGeneratorTests(unittest.TestCase):
 
         self.assertIsNotNone(cl1)
 
-    def test_multiturn_receivers_build_in_strict_mode_for_one_to_five_turns(self) -> None:
+    def test_multiturn_receivers_build_in_strict_mode_when_single_rack_fits(self) -> None:
         for turns in range(1, 6):
             with self.subTest(turns=turns):
-                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                overrides = {"number_of_secondary_turns": turns}
+                if turns >= 4:
+                    overrides["target_y_mm"] = 13.0 if turns == 5 else 12.0
+                cfg = generator.build_config(overrides)
                 primary = generator.build_primary_geometry(cfg)
                 cl2 = generator.build_cl2_geometry(cfg, primary)
                 cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
 
                 self.assertIsNotNone(cl2)
                 self.assertIsNotNone(cl1)
+
+    def test_multiturn_cl1_reports_when_compact_height_cannot_fit_single_rack(self) -> None:
+        for turns, target_y_mm in ((4, 9.0), (5, 9.0), (5, 12.0)):
+            with self.subTest(turns=turns, target_y_mm=target_y_mm):
+                cfg = generator.build_config(
+                    {"number_of_secondary_turns": turns, "target_y_mm": target_y_mm}
+                )
+                primary = generator.build_primary_geometry(cfg)
+                cl2 = generator.build_cl2_geometry(cfg, primary)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "right lower-via rack cannot fit",
+                ):
+                    generator.build_cl1_geometry(cfg, primary, cl2)
 
     def test_two_turn_receivers_use_generalized_builders_but_keep_legacy_labels(self) -> None:
         cfg = generator.build_config({"number_of_secondary_turns": 2})
@@ -459,7 +476,10 @@ class LinearSensorGeneratorTests(unittest.TestCase):
     def test_multiturn_cl2_columns_center_on_quarter_span_and_stay_inside_outer_envelope(self) -> None:
         for turns in (1, 3, 4, 5):
             with self.subTest(turns=turns):
-                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                overrides = {"number_of_secondary_turns": turns}
+                if turns >= 4:
+                    overrides["target_y_mm"] = 13.0 if turns == 5 else 12.0
+                cfg = generator.build_config(overrides)
                 dimensions = generator.calculate_dimensions(cfg)
                 cl2 = generator.build_cl2_geometry(cfg)
                 assert cl2 is not None
@@ -750,7 +770,10 @@ class LinearSensorGeneratorTests(unittest.TestCase):
     def test_multiturn_cl2_left_handoff_bundle_keeps_trace_and_via_clearance(self) -> None:
         for turns in range(2, 6):
             with self.subTest(turns=turns):
-                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                overrides = {"number_of_secondary_turns": turns}
+                if turns >= 4:
+                    overrides["target_y_mm"] = 13.0 if turns == 5 else 12.0
+                cfg = generator.build_config(overrides)
                 dimensions = generator.calculate_dimensions(cfg)
                 primary = generator.build_primary_geometry(cfg)
                 layout = generator.build_multiturn_cl2_layout(cfg, dimensions, primary)
@@ -996,7 +1019,10 @@ class LinearSensorGeneratorTests(unittest.TestCase):
     def test_multiturn_cl1_left_transition_handoff_stays_off_inner_next_start(self) -> None:
         for turns in (3, 5):
             with self.subTest(turns=turns):
-                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                overrides = {"number_of_secondary_turns": turns}
+                if turns >= 4:
+                    overrides["target_y_mm"] = 13.0 if turns == 5 else 12.0
+                cfg = generator.build_config(overrides)
                 primary = generator.build_primary_geometry(cfg)
                 cl2 = generator.build_cl2_geometry(cfg, primary)
                 cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
@@ -1016,7 +1042,10 @@ class LinearSensorGeneratorTests(unittest.TestCase):
     def test_cl1_right_transition_via_labels_match_physical_side(self) -> None:
         for turns in range(1, 6):
             with self.subTest(turns=turns):
-                cfg = generator.build_config({"number_of_secondary_turns": turns})
+                overrides = {"number_of_secondary_turns": turns}
+                if turns >= 4:
+                    overrides["target_y_mm"] = 13.0 if turns == 5 else 12.0
+                cfg = generator.build_config(overrides)
                 primary = generator.build_primary_geometry(cfg)
                 cl2 = generator.build_cl2_geometry(cfg, primary)
                 cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
@@ -1026,73 +1055,104 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                     self.assertLess(cl1.points[f"TURN{turn}_RIGHT_UPPER_VIA"][1], 0.0)
                     self.assertGreater(cl1.points[f"TURN{turn}_RIGHT_LOWER_VIA"][1], 0.0)
 
-    def test_three_turn_cl1_right_transition_uses_common_lower_rack(self) -> None:
-        cfg = generator.build_config({"number_of_secondary_turns": 3})
+    def test_cl1_right_transition_uses_generic_lower_rack_topology(self) -> None:
+        for turns in range(1, 6):
+            with self.subTest(turns=turns):
+                overrides = {"number_of_secondary_turns": turns}
+                if turns >= 4:
+                    overrides["target_y_mm"] = 13.0 if turns == 5 else 12.0
+                cfg = generator.build_config(overrides)
+                primary = generator.build_primary_geometry(cfg)
+                cl2 = generator.build_cl2_geometry(cfg, primary)
+                cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
+                assert cl1 is not None
+
+                outer_column = generator.cl1_right_end_column(cfg, 0)
+                lower_rack_columns = {
+                    cl1.points[f"TURN{turn}_RIGHT_LOWER_VIA"][0]
+                    for turn in range(1, turns + 1)
+                }
+                self.assertEqual(lower_rack_columns, {outer_column})
+
+                for turn_index in range(turns):
+                    turn = turn_index + 1
+                    reverse_index = turns - 1 - turn_index
+                    upper_via = cl1.points[f"TURN{turn}_RIGHT_UPPER_VIA"]
+                    lower_via = cl1.points[f"TURN{turn}_RIGHT_LOWER_VIA"]
+                    inner_entry_jog = cl1.points[f"TURN{turn}_RIGHT_INNER_ENTRY_JOG"]
+                    crossover_jog = cl1.points[f"TURN{turn}_RIGHT_CROSSOVER_JOG"]
+                    return_jog = cl1.points[f"TURN{turn}_RIGHT_RETURN_JOG"]
+                    reverse_start = cl1.points[f"TURN{turn}_REV_START"]
+
+                    self.assertAlmostEqual(
+                        upper_via[0], generator.cl1_right_end_column(cfg, turn_index)
+                    )
+                    self.assertLess(upper_via[1], 0.0)
+                    self.assertGreater(lower_via[1], 0.0)
+                    self.assertGreaterEqual(lower_via[0], outer_column)
+
+                    right_end = cl1.points[f"TURN{turn}_RIGHT_END"]
+                    self.assertAlmostEqual(
+                        right_end[0], generator.cl1_right_end_column(cfg, reverse_index)
+                    )
+                    self.assertEqual(inner_entry_jog, (right_end[0], lower_via[1]))
+                    self.assertEqual(crossover_jog, (upper_via[0], lower_via[1]))
+                    self.assertIn((right_end, inner_entry_jog), cl1.inner_segments)
+                    if inner_entry_jog != lower_via:
+                        self.assertIn((inner_entry_jog, lower_via), cl1.inner_segments)
+                    if lower_via != crossover_jog:
+                        self.assertIn((lower_via, crossover_jog), cl1.crossover_segments)
+                    self.assertIn((crossover_jog, upper_via), cl1.crossover_segments)
+
+                    self.assertEqual(return_jog, reverse_start)
+                    self.assertAlmostEqual(reverse_start[0], upper_via[0])
+                    self.assertIn((upper_via, return_jog), cl1.target_segments)
+
+                    reverse_mid_end = cl1.points[f"TURN{turn}_REV_MID_END"]
+                    reverse_mid_via = cl1.points[f"TURN{turn}_REV_MID_VIA"]
+                    reverse_inner_start = cl1.points[f"TURN{turn}_REV_INNER_START"]
+                    self.assertIn((reverse_mid_end, reverse_mid_via), cl1.target_segments)
+                    self.assertIn((reverse_mid_via, reverse_inner_start), cl1.inner_segments)
+                    self.assertTrue(
+                        any(segment[0] == reverse_start for segment in cl1.target_segments),
+                        f"turn {turn} right return should begin on the target layer",
+                    )
+                    self.assertTrue(
+                        any(segment[0] == reverse_inner_start for segment in cl1.inner_segments),
+                        f"turn {turn} left return should begin on Inner.1",
+                    )
+
+    def test_cl1_right_transition_prefers_single_rack_when_height_allows(self) -> None:
+        cfg = generator.build_config(
+            {"number_of_secondary_turns": 5, "target_y_mm": 13.0}
+        )
         primary = generator.build_primary_geometry(cfg)
         cl2 = generator.build_cl2_geometry(cfg, primary)
         cl1 = generator.build_cl1_geometry(cfg, primary, cl2)
         assert cl1 is not None
 
-        rack_x = generator.cl1_right_end_column(cfg, 0)
-        rack_top_y = generator.cl1_crossover_turn_half_height(
-            cfg, primary.dimensions, cl2, rack_x
-        )
-        via_spacing = generator.secondary_via_spacing(cfg)
-
-        for turn_index in range(3):
-            turn = turn_index + 1
-            reverse_index = 2 - turn_index
-            upper_via = cl1.points[f"TURN{turn}_RIGHT_UPPER_VIA"]
-            lower_via = cl1.points[f"TURN{turn}_RIGHT_LOWER_VIA"]
-            inner_entry_jog = cl1.points[f"TURN{turn}_RIGHT_INNER_ENTRY_JOG"]
-            crossover_jog = cl1.points[f"TURN{turn}_RIGHT_CROSSOVER_JOG"]
-            return_jog = cl1.points[f"TURN{turn}_RIGHT_RETURN_JOG"]
-            reverse_start = cl1.points[f"TURN{turn}_REV_START"]
-
-            self.assertAlmostEqual(upper_via[0], generator.cl1_right_end_column(cfg, turn_index))
-            self.assertLess(upper_via[1], 0.0)
-            self.assertEqual(lower_via, (rack_x, rack_top_y + (turn_index * via_spacing)))
-
-            expected_inner_end_x = generator.cl1_right_end_column(cfg, reverse_index)
-            self.assertEqual(return_jog, (upper_via[0], reverse_start[1]))
-            self.assertAlmostEqual(
-                reverse_start[0], generator.cl1_right_end_column(cfg, turn_index)
-            )
-
-            right_end = cl1.points[f"TURN{turn}_RIGHT_END"]
-            self.assertAlmostEqual(right_end[0], expected_inner_end_x)
-            self.assertEqual(inner_entry_jog, (right_end[0], lower_via[1]))
-            self.assertEqual(crossover_jog, (upper_via[0], lower_via[1]))
-            self.assertIn((right_end, inner_entry_jog), cl1.inner_segments)
-            if inner_entry_jog != lower_via:
-                self.assertIn((inner_entry_jog, lower_via), cl1.inner_segments)
-            if lower_via != crossover_jog:
-                self.assertIn((lower_via, crossover_jog), cl1.crossover_segments)
-            self.assertIn((crossover_jog, upper_via), cl1.crossover_segments)
-            self.assertIn((upper_via, return_jog), cl1.target_segments)
-            if return_jog != reverse_start:
-                self.assertIn((return_jog, reverse_start), cl1.target_segments)
-
-            reverse_mid_end = cl1.points[f"TURN{turn}_REV_MID_END"]
-            reverse_mid_via = cl1.points[f"TURN{turn}_REV_MID_VIA"]
-            reverse_inner_start = cl1.points[f"TURN{turn}_REV_INNER_START"]
-            self.assertIn((reverse_mid_end, reverse_mid_via), cl1.target_segments)
-            self.assertIn((reverse_mid_via, reverse_inner_start), cl1.inner_segments)
-            self.assertTrue(
-                any(segment[0] == reverse_start for segment in cl1.target_segments),
-                f"turn {turn} right return should begin on the target layer",
-            )
-            self.assertTrue(
-                any(segment[0] == reverse_inner_start for segment in cl1.inner_segments),
-                f"turn {turn} left return should begin on Inner.1",
-            )
+        lower_rack_columns = {
+            cl1.points[f"TURN{turn}_RIGHT_LOWER_VIA"][0]
+            for turn in range(1, 6)
+        }
+        self.assertEqual(lower_rack_columns, {generator.cl1_right_end_column(cfg, 0)})
 
     def test_multiturn_receivers_mirror_generated_points_on_bottom_right_fanout(self) -> None:
         left_cfg = generator.build_config(
-            {"number_of_secondary_turns": 4, "target_side": "bottom", "fanout_side": "left"}
+            {
+                "number_of_secondary_turns": 4,
+                "target_y_mm": 12.0,
+                "target_side": "bottom",
+                "fanout_side": "left",
+            }
         )
         right_cfg = generator.build_config(
-            {"number_of_secondary_turns": 4, "target_side": "bottom", "fanout_side": "right"}
+            {
+                "number_of_secondary_turns": 4,
+                "target_y_mm": 12.0,
+                "target_side": "bottom",
+                "fanout_side": "right",
+            }
         )
         left_primary = generator.build_primary_geometry(left_cfg)
         right_primary = generator.build_primary_geometry(right_cfg)
