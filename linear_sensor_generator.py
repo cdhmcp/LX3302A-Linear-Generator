@@ -32,7 +32,7 @@ Arc = tuple[Point, Point, Point]
 PROPERTIES = {
     # Moving target and stroke inputs
     "target_x_mm": 20.0,            # target width
-    "target_y_mm": 12.0,             # target height
+    "target_y_mm": 13.0,             # target height
     "stroke_range_mm": 90.0,        # typically total mechanical travel of target + width of target for best primary-to-secondary coupling
     "target_side": "top",           # valid options: top OR bottom
 
@@ -42,7 +42,7 @@ PROPERTIES = {
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
-    "number_of_secondary_turns": 4,     # valid range: 1..5
+    "number_of_secondary_turns": 5,     # valid range: 1..5
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Trace & Via constraints 
@@ -295,10 +295,13 @@ def terminal_row_y(cfg: dict, pad_name: str) -> float:
         "OSC2": -4,
         "VIN": -3,
         "OSC1": -2,
-        "CL1": -1,
-        "CL1-GND": 0,
-        "CL2-GND": 1,
-        "CL2": 2,
+        # Keep CL2 adjacent to the oscillator escapes.  CL1's local return
+        # handoff occupies the lower fanout lanes, where it can leave the
+        # sensor without crossing CL2's left-end escape geometry.
+        "CL2": -1,
+        "CL2-GND": 0,
+        "CL1-GND": 1,
+        "CL1": 2,
     }[pad_name]
     return row_index * terminal_pad_pitch(cfg)
 
@@ -4381,13 +4384,12 @@ def build_multiturn_cl1_layout(
             )
         left_lower_via_positions.append(position[0])
 
-    # Keep the return-exit via one trace pitch below CL1_D.  Sharing its
-    # y-coordinate put the via too close to CL2's final left detour on the
-    # compact layouts; the small vertical stagger retains a short exit while
-    # preserving the plated-via and trace clearance envelope.
+    # Place the return-exit via one via-to-trace clearance below CL1_D.  The
+    # target-layer entry can then pass directly above the via at its required
+    # clearance while CL2's nearby inner-layer return remains clear.
     left_return_escape_point = (
         left_columns[0] - via_pitch,
-        left_lower_via_positions[0][1] + trace_pitch(cfg),
+        left_lower_via_positions[0][1] + via_clearance,
     )
     if not transition_point_is_clear(left_return_escape_point):
         raise ValueError("CL1 left return escape via cannot clear the routing envelope.")
@@ -4439,9 +4441,26 @@ def build_multiturn_cl1_layout(
             amplitude_override=amplitude_override,
         )
 
+    entry_route_y = left_return_escape_point[1]
+    fanout_jog_x = terminal_x + via_clearance
+    entry_45_start_x = left_return_escape_point[0] - (
+        via_clearance * math.sqrt(2.0)
+    )
+    entry_45_end_x = entry_45_start_x + (
+        entry_route_y - left_lower_via_positions[0][1]
+    )
     points: dict[str, Point] = {
         "A": (terminal_x, entrance_y),
-        "B": (terminal_x + cfg["terminal_escape_length_mm"], entrance_y),
+        # CL1 enters on the same long fanout corridor as the Inner.1 return.
+        # It leaves that corridor at a 45-degree tangent around the return
+        # via, then approaches CL1_D on the target layer.
+        "A_FANOUT_JOG": (fanout_jog_x, entrance_y),
+        "B": (fanout_jog_x, entry_route_y),
+        "D_ENTRY_45_START": (entry_45_start_x, entry_route_y),
+        "D_ENTRY_45_END": (
+            entry_45_end_x,
+            left_lower_via_positions[0][1],
+        ),
         "D": left_lower_via_positions[0],
         "TURN1_START": point_at_station_x(
             secondary_rail_point(
@@ -4648,9 +4667,10 @@ def build_multiturn_cl1_layout(
         left_via_labels.extend((str(labels["left_upper_via"]), str(labels["left_lower_via"])))
         turn_specs.append(labels)
 
-    points["LEFT_RETURN_FANOUT_JOG"] = (left_return_escape_point[0], entrance_y)
-    fanout_jog_x = terminal_x + via_clearance
-    points["ZM"] = (fanout_jog_x, entrance_y)
+    # The return leaves its local via horizontally on Inner.1.  It only turns
+    # at the fanout spine, keeping it away from CL2's nearby local escape.
+    points["LEFT_RETURN_FANOUT_JOG"] = (fanout_jog_x, left_return_escape_point[1])
+    points["ZM"] = (fanout_jog_x, return_terminal_y)
     points["ZN_JOG"] = (fanout_jog_x, return_terminal_y)
     points["ZN"] = (terminal_x, return_terminal_y)
 
@@ -4658,8 +4678,11 @@ def build_multiturn_cl1_layout(
         points = mirror_points_horizontally(points)
 
     target_segments: list[Segment] = [
-        (points["A"], points["B"]),
-        (points["B"], points["D"]),
+        (points["A"], points["A_FANOUT_JOG"]),
+        (points["A_FANOUT_JOG"], points["B"]),
+        (points["B"], points["D_ENTRY_45_START"]),
+        (points["D_ENTRY_45_START"], points["D_ENTRY_45_END"]),
+        (points["D_ENTRY_45_END"], points["D"]),
         (points["D"], points["TURN1_START"]),
     ]
     inner_segments: list[Segment] = []
@@ -4811,11 +4834,45 @@ def build_multiturn_cl1_layout(
 
     left_return_escape_via = str(turn_specs[-1]["left_return_escape_via"])
     inner_segments.append((points[left_return_escape_via], points["LEFT_RETURN_FANOUT_JOG"]))
-    inner_segments.append((points["LEFT_RETURN_FANOUT_JOG"], points["ZM"]))
-    inner_segments.append((points["ZM"], points["ZN_JOG"]))
+    inner_segments.append((points["LEFT_RETURN_FANOUT_JOG"], points["ZN_JOG"]))
     inner_segments.append((points["ZN_JOG"], points["ZN"]))
     via_labels.extend((left_return_escape_via, "ZN"))
     left_via_labels.append(left_return_escape_via)
+
+    entry_escape_path = (
+        (points["A"], points["A_FANOUT_JOG"]),
+        (points["A_FANOUT_JOG"], points["B"]),
+        (points["B"], points["D_ENTRY_45_START"]),
+        (points["D_ENTRY_45_START"], points["D_ENTRY_45_END"]),
+        (points["D_ENTRY_45_END"], points["D"]),
+    )
+    return_escape_path = (
+        (points[left_return_escape_via], points["LEFT_RETURN_FANOUT_JOG"]),
+        (points["LEFT_RETURN_FANOUT_JOG"], points["ZN_JOG"]),
+        (points["ZN_JOG"], points["ZN"]),
+    )
+    if (
+        min(
+            point_to_segment_distance(points[left_return_escape_via], segment)
+            for segment in entry_escape_path
+        )
+        + GEOMETRY_TOLERANCE_MM
+        < via_clearance
+    ):
+        raise ValueError("CL1 entry trace cannot clear the left return escape via.")
+    if cl2_geometry is not None:
+        if (
+            path_to_path_distance(entry_escape_path, cl2_geometry.target_segments)
+            + GEOMETRY_TOLERANCE_MM
+            < trace_pitch(cfg)
+        ):
+            raise ValueError("CL1 entry escape violates clearance to CL2 target copper.")
+        if (
+            path_to_path_distance(return_escape_path, cl2_geometry.inner_segments)
+            + GEOMETRY_TOLERANCE_MM
+            < trace_pitch(cfg)
+        ):
+            raise ValueError("CL1 return escape violates clearance to CL2 inner copper.")
 
     return CL1LayoutPlan(
         points=points,

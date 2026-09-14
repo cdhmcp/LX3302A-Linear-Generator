@@ -115,10 +115,10 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             ("OSC2", primary.pads["OSC2_A"]),
             ("VIN", primary.pads["VIN_V"]),
             ("OSC1", primary.pads["OSC1_A"]),
-            ("CL1", cl1.points["A"]),
-            ("CL1-GND", cl1.points["ZN"]),
-            ("CL2-GND", cl2.points["ZP"]),
             ("CL2", cl2.points["A"]),
+            ("CL2-GND", cl2.points["ZP"]),
+            ("CL1-GND", cl1.points["ZN"]),
+            ("CL1", cl1.points["A"]),
         )
         expected_x = generator.terminal_column_x(cfg, primary.dimensions)
         expected_spacing = generator.terminal_pad_pitch(cfg)
@@ -128,9 +128,20 @@ class LinearSensorGeneratorTests(unittest.TestCase):
             self.assertAlmostEqual(point[1], generator.terminal_row_y(cfg, name))
         for (_, first), (_, second) in zip(terminals, terminals[1:]):
             self.assertAlmostEqual(generator.distance(first, second), expected_spacing)
-        self.assertEqual(cl1.points["A"][1], cl1.points["B"][1])
+        self.assertEqual(cl1.points["A"][1], cl1.points["A_FANOUT_JOG"][1])
         self.assertNotIn("C", cl1.points)
-        self.assertIn((cl1.points["B"], cl1.points["D"]), cl1.target_segments)
+        self.assertIn(
+            (cl1.points["B"], cl1.points["D_ENTRY_45_START"]),
+            cl1.target_segments,
+        )
+        self.assertIn(
+            (cl1.points["D_ENTRY_45_START"], cl1.points["D_ENTRY_45_END"]),
+            cl1.target_segments,
+        )
+        self.assertIn(
+            (cl1.points["D_ENTRY_45_END"], cl1.points["D"]),
+            cl1.target_segments,
+        )
 
     def test_bottom_target_mirrors_primary_and_escape_layers(self) -> None:
         cfg = generator.build_config({"target_side": "bottom"})
@@ -1042,10 +1053,41 @@ class LinearSensorGeneratorTests(unittest.TestCase):
                 self.assertLess(final_escape_via[0], final_upper_via[0])
                 self.assertIn((final_upper_via, final_escape_jog), cl1.crossover_segments)
                 self.assertIn((final_escape_jog, final_escape_via), cl1.crossover_segments)
+                self.assertAlmostEqual(
+                    cl1.points["B"][1],
+                    final_escape_via[1],
+                )
+                entry_45_start = cl1.points["D_ENTRY_45_START"]
+                entry_45_end = cl1.points["D_ENTRY_45_END"]
+                self.assertAlmostEqual(
+                    abs(entry_45_end[0] - entry_45_start[0]),
+                    abs(entry_45_end[1] - entry_45_start[1]),
+                )
+                self.assertIn((cl1.points["B"], entry_45_start), cl1.target_segments)
+                self.assertIn((entry_45_start, entry_45_end), cl1.target_segments)
+                self.assertIn((entry_45_end, cl1.points["D"]), cl1.target_segments)
                 self.assertIn(
                     (final_escape_via, cl1.points["LEFT_RETURN_FANOUT_JOG"]),
                     cl1.inner_segments,
                 )
+                self.assertEqual(
+                    cl1.points["LEFT_RETURN_FANOUT_JOG"][1], final_escape_via[1]
+                )
+
+    def test_receiver_terminal_rows_place_cl2_above_cl1(self) -> None:
+        cfg = generator.build_config()
+        self.assertLess(
+            generator.terminal_row_y(cfg, "CL2"),
+            generator.terminal_row_y(cfg, "CL2-GND"),
+        )
+        self.assertLess(
+            generator.terminal_row_y(cfg, "CL2-GND"),
+            generator.terminal_row_y(cfg, "CL1-GND"),
+        )
+        self.assertLess(
+            generator.terminal_row_y(cfg, "CL1-GND"),
+            generator.terminal_row_y(cfg, "CL1"),
+        )
 
     def test_cl1_right_transition_via_labels_match_physical_side(self) -> None:
         for turns in range(1, 6):
