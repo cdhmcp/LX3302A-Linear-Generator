@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """KiCad footprint generator for LX3302A linear sensor coil layouts.
 
-OSC1 and OSC2 are built from their annotated primary-coil point maps. Receiver
-coils CL1 and CL2 are built from the generalized multi-turn layout for all
-valid turn counts. The original fixed-2-turn receiver point maps are retained
-below for reference and regression checks.
+OSC1 and OSC2 are built from descriptive primary-coil point maps. Receiver
+coils CL1 and CL2 are built from generalized multi-turn layouts for all valid
+turn counts.
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ PROPERTIES = {
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
-    "number_of_secondary_turns": 5,     # valid range: 1..5
+    "number_of_secondary_turns": 2,     # valid range: 1..5
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Trace & Via constraints 
@@ -505,12 +504,43 @@ def mirror_arcs_horizontally(arcs: tuple[Arc, ...]) -> tuple[Arc, ...]:
     )
 
 
-def with_point_aliases(points: dict[str, Point], aliases: dict[str, str]) -> dict[str, Point]:
-    """Return a point-map copy with historical labels assigned to existing points."""
-    aliased_points = dict(points)
-    for alias, source_label in aliases.items():
-        aliased_points[alias] = points[source_label]
-    return aliased_points
+def canonical_receiver_label(label: str) -> str:
+    """Return the public descriptive name for a receiver layout anchor.
+
+    The multi-turn planners use compact internal directions while calculating
+    routes.  Their public point maps and KiCad pad labels use explicit curve
+    boundary and jog roles instead, without changing any coordinates.
+    """
+    substitutions = (
+        ("_RIGHT_TURNAROUND_RUNUP", "_RIGHT_TURNAROUND_JOG"),
+        ("_LEFT_TURNAROUND_VIA", "_LEFT_TURNAROUND_VIA"),
+        ("_RETURN_RIGHT_OUTER", "_RETURN_RIGHT_OUTER_END"),
+        ("_RETURN_RIGHT_INNER", "_RETURN_RIGHT_INNER_START"),
+        ("_RETURN_LEFT_INNER", "_RETURN_LEFT_INNER_END"),
+        ("_RETURN_LEFT_OUTER", "_RETURN_LEFT_OUTER_START"),
+        ("_LEFT_OUTER", "_FORWARD_LEFT_OUTER_END"),
+        ("_LEFT_INNER", "_FORWARD_LEFT_INNER_START"),
+        ("_RIGHT_INNER", "_FORWARD_RIGHT_INNER_END"),
+        ("_RIGHT_OUTER", "_FORWARD_RIGHT_OUTER_START"),
+        ("_RIGHT_END", "_RIGHT_TURNAROUND_START"),
+        ("_LEFT_END", "_LEFT_TURNAROUND_END"),
+    )
+    for old, new in substitutions:
+        if label.endswith(old):
+            return f"{label[:-len(old)]}{new}"
+    return label
+
+
+def canonical_receiver_point_map(
+    points: dict[str, Point],
+    via_labels: tuple[str, ...],
+) -> tuple[dict[str, Point], tuple[str, ...]]:
+    """Rename public receiver anchors and via labels without moving copper."""
+    renamed_points = {canonical_receiver_label(label): point for label, point in points.items()}
+    renamed_vias = tuple(canonical_receiver_label(label) for label in via_labels)
+    if len(renamed_points) != len(points):
+        raise ValueError("Canonical receiver naming produced duplicate point labels.")
+    return renamed_points, renamed_vias
 
 
 def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> None:
@@ -605,7 +635,7 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         if last_transition_x + receiver_via_spacing + GEOMETRY_TOLERANCE_MM >= last_right_x:
             raise ValueError("CL1 transition columns exceed the available secondary span.")
 def osc1_via_trace_clearance(cfg: dict) -> float:
-    """Return center-to-center clearance from the U via to an adjacent trace."""
+    """Return center-to-center clearance from the shared VIN via to a trace."""
     return (
         (cfg["via_diameter_mm"] / 2.0)
         + (cfg["trace_width_mm"] / 2.0)
@@ -614,14 +644,7 @@ def osc1_via_trace_clearance(cfg: dict) -> float:
 
 
 def osc1_turn_labels(turn_index: int) -> tuple[str, str, str, str, str, str]:
-    """Return point-map labels for a turn, extending names beyond the reference."""
-    point_map_labels = (
-        ("C", "D", "E", "F", "G", "H"),
-        ("I", "J", "K", "L", "M", "N"),
-        ("O", "P", "Q", "R", "S", "T"),
-    )
-    if turn_index < len(point_map_labels):
-        return point_map_labels[turn_index]
+    """Return canonical point-map labels for one OSC1 perimeter turn."""
     turn_number = turn_index + 1
     return (
         f"TURN{turn_number}_START",
@@ -634,7 +657,7 @@ def osc1_turn_labels(turn_index: int) -> tuple[str, str, str, str, str, str]:
 
 
 def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Point]:
-    """Construct OSC1 points using the annotated A-through-V path pattern."""
+    """Construct OSC1 points using descriptive path anchors."""
     side = fanout_direction(cfg)
     pitch = trace_pitch(cfg)
     diagonal_junction_separation = parallel_45_junction_separation(cfg)
@@ -663,9 +686,9 @@ def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, P
     entry_outer_x = terminal_x - (side * via_transition)
     entry_inner_x = entry_outer_x
     points: dict[str, Point] = {
-        "A": (terminal_x, terminal_y),
-        "A_JOG": (entry_outer_x, terminal_y),
-        "B": (entry_inner_x, start_y),
+        "TERMINAL_OUTPUT_VIA": (terminal_x, terminal_y),
+        "ENTRY_FANOUT_JOG": (entry_outer_x, terminal_y),
+        "ENTRY_WINDING_JOG": (entry_inner_x, start_y),
     }
 
     for turn in range(turn_count):
@@ -691,12 +714,15 @@ def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, P
     via_y = inner_top_y + via_transition + cfg["trace_spacing_mm"]
     points[last_end] = (inner_near_x, last_end_y)
     via_x = inner_near_x - (side * via_transition)
-    points["U"] = (via_x, via_y)
+    points["SHARED_VIN_VIA"] = (via_x, via_y)
     # A direct orthogonal VIN escape is clear of the new oscillator fanout
     # order when it first stops one via-to-trace clearance inside the column.
-    points["VIN_JOG"] = (terminal_x - (side * via_transition), via_y)
-    points["V"] = (terminal_x, terminal_row_y(cfg, "VIN"))
-    points["VIN_APPROACH"] = (points["VIN_JOG"][0], points["V"][1])
+    points["VIN_FANOUT_JOG"] = (terminal_x - (side * via_transition), via_y)
+    points["TERMINAL_VIN_VIA"] = (terminal_x, terminal_row_y(cfg, "VIN"))
+    points["VIN_TERMINAL_APPROACH"] = (
+        points["VIN_FANOUT_JOG"][0],
+        points["TERMINAL_VIN_VIA"][1],
+    )
     return points
 
 
@@ -705,49 +731,39 @@ def build_osc1_segments(
     points: dict[str, Point],
 ) -> tuple[tuple[Segment, ...], tuple[Segment, ...]]:
     """Return OSC1 bottom-layer winding and target-facing escape segments."""
-    point_sequence = ["A", "A_JOG", "B"]
+    point_sequence = ["TERMINAL_OUTPUT_VIA", "ENTRY_FANOUT_JOG", "ENTRY_WINDING_JOG"]
     for turn in range(cfg["number_of_primary_turns"]):
         point_sequence.extend(osc1_turn_labels(turn))
-    point_sequence.append("U")
+    point_sequence.append("SHARED_VIN_VIA")
     body = tuple(
         (points[start], points[end])
         for start, end in zip(point_sequence, point_sequence[1:])
     )
     escape_segments = (
-        (points["U"], points["VIN_JOG"]),
-        (points["VIN_JOG"], points["VIN_APPROACH"]),
-        (points["VIN_APPROACH"], points["V"]),
+        (points["SHARED_VIN_VIA"], points["VIN_FANOUT_JOG"]),
+        (points["VIN_FANOUT_JOG"], points["VIN_TERMINAL_APPROACH"]),
+        (points["VIN_TERMINAL_APPROACH"], points["TERMINAL_VIN_VIA"]),
     )
     return body, escape_segments
 
 
 def osc2_turn_labels(turn_index: int) -> tuple[str, str, str, str]:
-    """Return OSC2 labels for one overlaid perimeter in point-map order."""
-    point_map_labels = (
-        ("G", "OUTER_TOP_FAR", "OUTER_BOTTOM_FAR", "J"),
-        ("M", "MIDDLE_TOP_FAR", "MIDDLE_BOTTOM_FAR", "P"),
-        ("S", "INNER_TOP_FAR", "INNER_BOTTOM_FAR", "V"),
-    )
-    if turn_index < len(point_map_labels):
-        return point_map_labels[turn_index]
+    """Return canonical labels for one overlaid OSC2 perimeter turn."""
     turn_number = turn_index + 1
     return (
-        f"OSC2_TURN{turn_number}_START",
-        f"OSC2_TURN{turn_number}_TOP_FAR",
-        f"OSC2_TURN{turn_number}_BOTTOM_FAR",
-        f"OSC2_TURN{turn_number}_END",
+        f"TURN{turn_number}_START",
+        f"TURN{turn_number}_TOP_FAR",
+        f"TURN{turn_number}_BOTTOM_FAR",
+        f"TURN{turn_number}_END",
     )
 
 
 def osc2_transition_labels(turn_index: int) -> tuple[str, str]:
     """Return the labels between an overlaid OSC2 perimeter and the next one."""
-    point_map_labels = (("K", "L"), ("Q", "R"))
-    if turn_index < len(point_map_labels):
-        return point_map_labels[turn_index]
     turn_number = turn_index + 1
     return (
-        f"OSC2_AFTER_TURN{turn_number}_NEAR",
-        f"OSC2_AFTER_TURN{turn_number}_INNER",
+        f"TURN{turn_number}_TO_TURN{turn_number + 1}_NEAR_JOG",
+        f"TURN{turn_number}_TO_TURN{turn_number + 1}_INNER_JOG",
     )
 
 
@@ -763,8 +779,11 @@ def build_osc2_point_map(
     turn_count = cfg["number_of_primary_turns"]
     outer_x = osc1_points[osc1_turn_labels(0)[1]][0]
     points: dict[str, Point] = {
-        "A": (osc1_points["A"][0], terminal_row_y(cfg, "OSC2")),
-        "X": osc1_points["U"],
+        "TERMINAL_OUTPUT_VIA": (
+            osc1_points["TERMINAL_OUTPUT_VIA"][0],
+            terminal_row_y(cfg, "OSC2"),
+        ),
+        "SHARED_VIN_VIA": osc1_points["SHARED_VIN_VIA"],
     }
 
     # Overlay each OSC1 rectangular perimeter in the opposite traversal order.
@@ -784,39 +803,41 @@ def build_osc2_point_map(
 
     # Work backward from shared VIN so the independent 45 degree transitions
     # retain legal pitch as more turns are added.
-    points["W"] = (near_x[-1], points["X"][1] + via_clearance)
-    transition_tail_y = points["W"][1]
+    points["VIN_APPROACH"] = (near_x[-1], points["SHARED_VIN_VIA"][1] + via_clearance)
+    transition_tail_y = points["VIN_APPROACH"][1]
     for turn in reversed(range(turn_count - 1)):
         near_label, inner_label = osc2_transition_labels(turn)
         points[inner_label] = (near_x[turn + 1], transition_tail_y - junction_separation)
         points[near_label] = (near_x[turn], points[inner_label][1] + pitch)
         transition_tail_y = points[near_label][1]
 
-    points["F"] = (outer_x, transition_tail_y - junction_separation)
+    points["ENTRY_WINDING_JOG"] = (outer_x, transition_tail_y - junction_separation)
     # Enter the oscillator at the existing outer-turn transition height rather
     # than dropping to y=0.  The terminal-side route stays entirely inboard of
     # the fanout via column and uses only horizontal and vertical legs.
-    entry_y = points["F"][1]
-    terminal_y = points["A"][1]
-    points["A_JOG"] = (
-        osc1_points["A"][0] - (side * via_clearance),
+    entry_y = points["ENTRY_WINDING_JOG"][1]
+    terminal_y = points["TERMINAL_OUTPUT_VIA"][1]
+    points["ENTRY_FANOUT_JOG"] = (
+        osc1_points["TERMINAL_OUTPUT_VIA"][0] - (side * via_clearance),
         terminal_y,
     )
-    points["B"] = (points["A_JOG"][0], entry_y)
-    points["C"] = points["B"]
-    points["D"] = points["C"]
-    points["E"] = points["F"]
+    points["ENTRY_WINDING_APPROACH"] = (points["ENTRY_FANOUT_JOG"][0], entry_y)
     return points
 
 
 def build_osc2_segments(cfg: dict, points: dict[str, Point]) -> tuple[Segment, ...]:
-    """Return OSC2 path in alphabetical point-map order, with hidden far corners."""
-    point_sequence = ["A", "A_JOG", "B", "F"]
+    """Return OSC2 path in descriptive point-map order."""
+    point_sequence = [
+        "TERMINAL_OUTPUT_VIA",
+        "ENTRY_FANOUT_JOG",
+        "ENTRY_WINDING_APPROACH",
+        "ENTRY_WINDING_JOG",
+    ]
     for turn in range(cfg["number_of_primary_turns"]):
         point_sequence.extend(osc2_turn_labels(turn))
         if turn < cfg["number_of_primary_turns"] - 1:
             point_sequence.extend(osc2_transition_labels(turn))
-    point_sequence.extend(("W", "X"))
+    point_sequence.extend(("VIN_APPROACH", "SHARED_VIN_VIA"))
     return tuple(
         (points[start], points[end])
         for start, end in zip(point_sequence, point_sequence[1:])
@@ -831,25 +852,29 @@ def validate_osc1_clearance(
 ) -> None:
     """Ensure the OSC1 via transition and terminal vias are manufacturable."""
     minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    for start, end in (("A", "V"), ("A", "U"), ("U", "V")):
+    for start, end in (
+        ("TERMINAL_OUTPUT_VIA", "TERMINAL_VIN_VIA"),
+        ("TERMINAL_OUTPUT_VIA", "SHARED_VIN_VIA"),
+        ("SHARED_VIN_VIA", "TERMINAL_VIN_VIA"),
+    ):
         if distance(points[start], points[end]) < minimum_pad_distance:
             raise ValueError(f"OSC1 vias {start} and {end} violate plated via clearance.")
 
     minimum_trace_distance = osc1_via_trace_clearance(cfg)
     connected_body = {
-        "A": body_segments[:1],
-        "U": body_segments[-1:],
-        "V": (),
+        "TERMINAL_OUTPUT_VIA": body_segments[:1],
+        "SHARED_VIN_VIA": body_segments[-1:],
+        "TERMINAL_VIN_VIA": (),
     }
-    for pad_name in ("A", "U", "V"):
+    for pad_name in connected_body:
         for segment in body_segments:
             if segment in connected_body[pad_name]:
                 continue
             if point_to_segment_distance(points[pad_name], segment) < minimum_trace_distance:
                 raise ValueError(f"OSC1 {pad_name} via violates clearance to winding copper.")
     for segment in escape_segments:
-        if point_to_segment_distance(points["A"], segment) < minimum_trace_distance:
-            raise ValueError("OSC1 A via violates clearance to the top-layer VIN escape.")
+        if point_to_segment_distance(points["TERMINAL_OUTPUT_VIA"], segment) < minimum_trace_distance:
+            raise ValueError("OSC1 output terminal via violates clearance to the VIN escape.")
 
 
 def validate_osc2_clearance(
@@ -861,29 +886,29 @@ def validate_osc2_clearance(
     osc2_body_segments: tuple[Segment, ...],
 ) -> None:
     """Check OSC2 fanout against existing through-vias and shared VIN routing."""
-    if osc2_points["X"] != osc1_points["U"]:
-        raise ValueError("OSC2 must terminate at OSC1's shared VIN via U.")
+    if osc2_points["SHARED_VIN_VIA"] != osc1_points["SHARED_VIN_VIA"]:
+        raise ValueError("OSC2 must terminate at OSC1's shared VIN via.")
 
     minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    for osc1_pad in ("A", "V"):
-        if distance(osc2_points["A"], osc1_points[osc1_pad]) < minimum_pad_distance:
-            raise ValueError(f"OSC2 A via violates clearance to OSC1 {osc1_pad} via.")
+    for osc1_pad in ("TERMINAL_OUTPUT_VIA", "TERMINAL_VIN_VIA"):
+        if distance(osc2_points["TERMINAL_OUTPUT_VIA"], osc1_points[osc1_pad]) < minimum_pad_distance:
+            raise ValueError(f"OSC2 output terminal via violates clearance to OSC1 {osc1_pad}.")
 
     minimum_trace_distance = osc1_via_trace_clearance(cfg)
     for segment in osc2_body_segments:
         if (
-            point_to_segment_distance(osc1_points["A"], segment) + GEOMETRY_TOLERANCE_MM
+            point_to_segment_distance(osc1_points["TERMINAL_OUTPUT_VIA"], segment) + GEOMETRY_TOLERANCE_MM
             < minimum_trace_distance
         ):
-            raise ValueError("OSC2 entry copper violates clearance to OSC1 A via.")
+            raise ValueError("OSC2 entry copper violates clearance to OSC1 output via.")
         if (
-            point_to_segment_distance(osc1_points["V"], segment) + GEOMETRY_TOLERANCE_MM
+            point_to_segment_distance(osc1_points["TERMINAL_VIN_VIA"], segment) + GEOMETRY_TOLERANCE_MM
             < minimum_trace_distance
         ):
-            raise ValueError("OSC2 copper violates clearance to OSC1 V via.")
+            raise ValueError("OSC2 copper violates clearance to OSC1 VIN terminal via.")
     for segment in osc1_body_segments + osc1_escape_segments:
-        if point_to_segment_distance(osc2_points["A"], segment) < minimum_trace_distance:
-            raise ValueError("OSC2 A via violates clearance to OSC1 copper.")
+        if point_to_segment_distance(osc2_points["TERMINAL_OUTPUT_VIA"], segment) < minimum_trace_distance:
+            raise ValueError("OSC2 output terminal via violates clearance to OSC1 copper.")
 
 
 def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
@@ -906,7 +931,11 @@ def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
             osc1_escape_segments,
         )
     ]
-    pads = {"OSC1_A": osc1_points["A"], "VIN_U": osc1_points["U"], "VIN_V": osc1_points["V"]}
+    pads = {
+        "OSC1_TERMINAL_OUTPUT_VIA": osc1_points["TERMINAL_OUTPUT_VIA"],
+        "VIN_SHARED_VIA": osc1_points["SHARED_VIN_VIA"],
+        "VIN_TERMINAL_VIA": osc1_points["TERMINAL_VIN_VIA"],
+    }
 
     if cfg["generate_osc2"]:
         osc2_points = build_osc2_point_map(cfg, osc1_points)
@@ -923,7 +952,7 @@ def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
         coils.append(
             PrimaryCoil("OSC2", osc2_layer, osc2_layer, osc2_points, osc2_body_segments, ())
         )
-        pads["OSC2_A"] = osc2_points["A"]
+        pads["OSC2_TERMINAL_OUTPUT_VIA"] = osc2_points["TERMINAL_OUTPUT_VIA"]
 
     return PrimaryGeometry(
         dimensions=dimensions,
@@ -1249,274 +1278,6 @@ def secondary_corrected_rail_point(
     )
 
 
-# NOTE: Retained for historical reference and direct regression tests only.
-# The live CL2 generator now always uses build_multiturn_cl2_layout(),
-# including when number_of_secondary_turns == 2.
-def build_cl2_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, Point]:
-    """Construct the original annotated two-turn CL2 point map."""
-    half_span = secondary_stroke_length(cfg) / 2.0
-    quarter_span = half_span / 2.0
-    amplitude = dimensions.secondary_width_mm / 2.0
-    pitch = trace_pitch(cfg)
-    via_pair_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    inner_primary_y = primary_inner_half_height(cfg, dimensions)
-    primary_via_clearance = osc1_via_trace_clearance(cfg)
-    # These plated transition vias belong inside all primary turns, not
-    # outside them. Move toward center from the innermost primary centerline.
-    upper_via_y = -(inner_primary_y - primary_via_clearance)
-    lower_via_y = inner_primary_y - primary_via_clearance
-    runup = cfg["secondary_jump_runup_via_multiplier"] * cfg["via_diameter_mm"]
-    detour = cfg["secondary_jump_detour_via_multiplier"] * cfg["via_diameter_mm"]
-    terminal_x = -((dimensions.primary_length_mm / 2.0) + cfg["terminal_escape_length_mm"])
-    terminal_output_y = terminal_row_y(cfg, "CL2")
-    terminal_return_y = terminal_row_y(cfg, "CL2-GND")
-    _, midpoint_slope = secondary_wave_value_and_slope(cfg, dimensions, -half_span, -1.0)
-    midpoint_horizontal_spacing = (
-        pitch * math.hypot(midpoint_slope, 1.0) / abs(midpoint_slope)
-    )
-
-    points: dict[str, Point] = {
-        # Provisional IC-side fanout, kept outside the primary boundary.
-        "A": (terminal_x, terminal_output_y),
-        "B": (terminal_x + abs(terminal_output_y), 0.0),
-        "C": (-half_span, 0.0),
-        # First forward pass.
-        "D": (-quarter_span + (via_pair_spacing / 2.0), -amplitude),
-        "E": (-quarter_span + (via_pair_spacing / 2.0), upper_via_y),
-        "F": (-quarter_span + (via_pair_spacing / 2.0), -amplitude + pitch),
-        "G": (quarter_span + (via_pair_spacing / 2.0), amplitude),
-        "H": (quarter_span + (via_pair_spacing / 2.0), lower_via_y),
-        "I": (quarter_span + (via_pair_spacing / 2.0), amplitude - pitch),
-        "J": (half_span, -(pitch / 2.0)),
-        # First reverse pass.
-        "N": (quarter_span - (via_pair_spacing / 2.0), -amplitude),
-        "O": (quarter_span - (via_pair_spacing / 2.0), upper_via_y),
-        "P": (quarter_span - (via_pair_spacing / 2.0), -amplitude + pitch),
-        "Q": (-quarter_span - (via_pair_spacing / 2.0), amplitude),
-        "R": (-quarter_span - (via_pair_spacing / 2.0), lower_via_y),
-        "S": (-quarter_span - (via_pair_spacing / 2.0), amplitude - pitch),
-        "W": (-half_span + midpoint_horizontal_spacing, 0.0),
-        # Second forward pass.
-        "X": (-quarter_span - (via_pair_spacing / 2.0), -amplitude + pitch),
-        "Y": (-quarter_span - (via_pair_spacing / 2.0), upper_via_y),
-        "Z": (-quarter_span - (via_pair_spacing / 2.0), -amplitude),
-        "ZA": (quarter_span - (via_pair_spacing / 2.0), amplitude - pitch),
-        "ZB": (quarter_span - (via_pair_spacing / 2.0), lower_via_y),
-        "ZC": (quarter_span - (via_pair_spacing / 2.0), amplitude),
-        "ZG": (half_span, pitch / 2.0),
-        # Second reverse pass and terminal escape.
-        "ZH": (quarter_span + (via_pair_spacing / 2.0), -amplitude + pitch),
-        "ZI": (quarter_span + (via_pair_spacing / 2.0), upper_via_y),
-        "ZJ": (quarter_span + (via_pair_spacing / 2.0), -amplitude),
-        "ZK": (-quarter_span + (via_pair_spacing / 2.0), amplitude - pitch),
-        "ZL": (-quarter_span + (via_pair_spacing / 2.0), lower_via_y),
-        "ZM": (-quarter_span + (via_pair_spacing / 2.0), amplitude),
-        "ZN": (-half_span, 0.0),
-        "ZO": (terminal_x + abs(terminal_return_y), 0.0),
-        "ZP": (terminal_x, terminal_return_y),
-    }
-
-    points["K"] = secondary_rail_point(
-        cfg, dimensions, points["J"][0] - runup, 1.0, -(pitch / 2.0)
-    )
-    points["L"] = (points["K"][0], points["K"][1] - detour)
-    points["M"] = points["K"]
-
-    t_station_x = points["W"][0] + runup
-    points["T"] = secondary_corrected_rail_point(
-        cfg,
-        dimensions,
-        t_station_x,
-        1.0,
-        -(pitch / 2.0),
-        points["S"],
-        points["W"],
-    )
-    points["U"] = (points["T"][0], points["T"][1] - detour)
-    points["V"] = points["T"]
-
-    points["ZD"] = secondary_rail_point(
-        cfg, dimensions, points["ZG"][0] - runup, -1.0, pitch / 2.0
-    )
-    points["ZE"] = (points["ZD"][0], points["ZD"][1] + detour)
-    points["ZF"] = points["ZD"]
-
-    if fanout_direction(cfg) > 0:
-        points = {label: (-point[0], point[1]) for label, point in points.items()}
-    return points
-
-
-# NOTE: Retained for historical reference and direct regression tests only.
-# The live CL2 generator now always uses build_multiturn_cl2_layout(),
-# including when number_of_secondary_turns == 2.
-def build_cl2_segments(
-    cfg: dict,
-    dimensions: SensorDimensions,
-    points: dict[str, Point],
-) -> tuple[tuple[Segment, ...], tuple[Segment, ...]]:
-    """Return the original fixed-2-turn CL2 copper segments."""
-    target_segments: list[Segment] = []
-    inner_segments: list[Segment] = []
-
-    def line(collection: list[Segment], start: str, end: str) -> None:
-        collection.append((points[start], points[end]))
-
-    half_pitch = trace_pitch(cfg) / 2.0
-
-    def curve(
-        collection: list[Segment],
-        start: str,
-        end: str,
-        phase_sign: float,
-        rail_offset: float,
-        reference: tuple[str, str] | None = None,
-        stations: tuple[float, float] | None = None,
-    ) -> None:
-        reference_start = None if reference is None else points[reference[0]]
-        reference_end = None if reference is None else points[reference[1]]
-        collection.extend(
-            secondary_curve_segments(
-                cfg,
-                dimensions,
-                points[start],
-                points[end],
-                phase_sign,
-                rail_offset,
-                reference_start,
-                reference_end,
-                None if stations is None else stations[0],
-                None if stations is None else stations[1],
-            )
-        )
-
-    line(target_segments, "A", "B")
-    line(target_segments, "B", "C")
-    curve(target_segments, "C", "D", -1.0, -half_pitch)
-    line(target_segments, "D", "E")
-    line(inner_segments, "E", "F")
-    curve(inner_segments, "F", "G", -1.0, half_pitch)
-    line(inner_segments, "G", "H")
-    line(target_segments, "H", "I")
-    curve(target_segments, "I", "J", -1.0, -half_pitch)
-    curve(target_segments, "J", "K", 1.0, -half_pitch)
-    line(target_segments, "K", "L")
-    line(inner_segments, "L", "M")
-    curve(inner_segments, "M", "N", 1.0, -half_pitch)
-    line(inner_segments, "N", "O")
-    line(target_segments, "O", "P")
-    curve(target_segments, "P", "Q", 1.0, half_pitch)
-    line(target_segments, "Q", "R")
-    line(inner_segments, "R", "S")
-    u_transition_station_x = (
-        points["W"][0]
-        - (
-            fanout_direction(cfg)
-            * cfg["secondary_jump_runup_via_multiplier"]
-            * cfg["via_diameter_mm"]
-        )
-    )
-    curve(
-        inner_segments,
-        "S",
-        "T",
-        1.0,
-        -half_pitch,
-        ("S", "W"),
-        (points["S"][0], u_transition_station_x),
-    )
-    line(inner_segments, "T", "U")
-    line(target_segments, "U", "V")
-    curve(
-        target_segments,
-        "V",
-        "W",
-        1.0,
-        -half_pitch,
-        ("S", "W"),
-        (u_transition_station_x, points["W"][0]),
-    )
-    curve(target_segments, "W", "X", -1.0, half_pitch)
-    line(target_segments, "X", "Y")
-    line(inner_segments, "Y", "Z")
-    curve(inner_segments, "Z", "ZA", -1.0, -half_pitch)
-    line(inner_segments, "ZA", "ZB")
-    line(target_segments, "ZB", "ZC")
-    curve(target_segments, "ZC", "ZD", -1.0, half_pitch)
-    line(target_segments, "ZD", "ZE")
-    line(inner_segments, "ZE", "ZF")
-    curve(inner_segments, "ZF", "ZG", -1.0, half_pitch)
-    curve(inner_segments, "ZG", "ZH", 1.0, half_pitch)
-    line(inner_segments, "ZH", "ZI")
-    line(target_segments, "ZI", "ZJ")
-    curve(target_segments, "ZJ", "ZK", 1.0, -half_pitch)
-    line(target_segments, "ZK", "ZL")
-    line(inner_segments, "ZL", "ZM")
-    curve(inner_segments, "ZM", "ZN", 1.0, half_pitch)
-    line(inner_segments, "ZN", "ZO")
-    line(inner_segments, "ZO", "ZP")
-    return tuple(target_segments), tuple(inner_segments)
-
-
-# NOTE: Retained for historical reference and direct regression tests only.
-# The live CL2 generator now always uses validate_multiturn_cl2_clearance(),
-# including when number_of_secondary_turns == 2.
-def validate_cl2_clearance(
-    cfg: dict,
-    dimensions: SensorDimensions,
-    primary_geometry: PrimaryGeometry,
-    points: dict[str, Point],
-) -> None:
-    """Validate the original fixed-2-turn CL2 geometry."""
-    minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    for first, second in (("E", "Y"), ("H", "ZB"), ("O", "ZI"), ("R", "ZL")):
-        if distance(points[first], points[second]) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance:
-            raise ValueError(f"CL2 paired vias {first}/{second} violate plated via clearance.")
-
-    primary_pads = tuple(primary_geometry.pads.values())
-    for terminal in ("A", "ZP"):
-        for primary_pad in primary_pads:
-            if distance(points[terminal], primary_pad) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance:
-                raise ValueError(f"CL2 terminal {terminal} collides with a primary via.")
-
-    minimum_primary_trace_distance = osc1_via_trace_clearance(cfg)
-    for via_label in ("E", "Y", "H", "ZB", "O", "ZI", "R", "ZL"):
-        nearest_primary_trace = min(
-            point_to_segment_distance(points[via_label], segment)
-            for coil in primary_geometry.coils
-            for segment in coil.body_segments
-        )
-        if (
-            nearest_primary_trace + GEOMETRY_TOLERANCE_MM
-            < minimum_primary_trace_distance
-        ):
-            raise ValueError(
-                f"CL2 via {via_label} violates clearance to the primary winding."
-            )
-
-    pitch = trace_pitch(cfg)
-    half_pitch = pitch / 2.0
-    polygonal_tolerance = 0.001
-    parallel_paths = (
-        (
-            secondary_curve_segments(cfg, dimensions, points["F"], points["G"], -1.0, half_pitch),
-            secondary_curve_segments(cfg, dimensions, points["Z"], points["ZA"], -1.0, -half_pitch),
-        ),
-        (
-            secondary_curve_segments(cfg, dimensions, points["P"], points["Q"], 1.0, half_pitch),
-            secondary_curve_segments(cfg, dimensions, points["ZJ"], points["ZK"], 1.0, -half_pitch),
-        ),
-    )
-    for first, second in parallel_paths:
-        actual_spacing = path_to_path_distance(first, second)
-        if actual_spacing + polygonal_tolerance < pitch:
-            raise ValueError(
-                "CL2 parallel sinusoidal traces violate configured spacing: "
-                f"minimum centerline distance is {actual_spacing:.6f} mm, "
-                f"required pitch is {pitch:.6f} mm."
-            )
-
-
-@lru_cache(maxsize=None)
 def cl2_right_turnaround_assignment_candidates(
     turn_count: int,
     column_count: int,
@@ -1537,15 +1298,15 @@ def cl2_right_turnaround_segments(
 ) -> tuple[tuple[str, ...], tuple[Segment, ...], tuple[Segment, ...]]:
     """Return the generated CL2 right-end jog-via turnaround segments."""
     via_labels = tuple(
-        f"TURN{turn_number}_RIGHT_DETOUR_VIA"
+        f"TURN{turn_number}_RIGHT_TURNAROUND_VIA"
         for turn_number in range(1, turn_count + 1)
     )
     target_segments = tuple(
-        (points[f"TURN{turn_number}_RIGHT_END"], points[f"TURN{turn_number}_RIGHT_DETOUR_VIA"])
+        (points[f"TURN{turn_number}_RIGHT_END"], points[f"TURN{turn_number}_RIGHT_TURNAROUND_VIA"])
         for turn_number in range(1, turn_count + 1)
     )
     inner_segments = tuple(
-        (points[f"TURN{turn_number}_RIGHT_DETOUR_VIA"], points[f"TURN{turn_number}_RIGHT_RUNUP"])
+        (points[f"TURN{turn_number}_RIGHT_TURNAROUND_VIA"], points[f"TURN{turn_number}_RIGHT_TURNAROUND_RUNUP"])
         for turn_number in range(1, turn_count + 1)
     )
     return via_labels, target_segments, inner_segments
@@ -1559,7 +1320,7 @@ def cl2_left_turnaround_via_points(cfg: dict) -> dict[str, Point]:
     via_spacing = secondary_via_spacing(cfg)
     left_column_x = -((secondary_stroke_length(cfg) / 2.0) + via_spacing)
     return {
-        f"TURN{turn_number}_LEFT_DETOUR_VIA": (left_column_x, via_y)
+        f"TURN{turn_number}_LEFT_TURNAROUND_VIA": (left_column_x, via_y)
         for turn_number, via_y in enumerate(
             centered_positions(turn_count - 1, via_spacing),
             start=1,
@@ -1573,12 +1334,12 @@ def cl2_left_turnaround_segments(
 ) -> tuple[tuple[str, ...], tuple[Segment, ...], tuple[Segment, ...]]:
     """Return the mirrored left-side jog-via handoff segments between CL2 turns."""
     via_labels = tuple(
-        f"TURN{turn_number}_LEFT_DETOUR_VIA"
+        f"TURN{turn_number}_LEFT_TURNAROUND_VIA"
         for turn_number in range(1, turn_count)
     )
     target_segments = tuple(
         (
-            points[f"TURN{turn_number}_LEFT_DETOUR_VIA"],
+            points[f"TURN{turn_number}_LEFT_TURNAROUND_VIA"],
             points[f"TURN{turn_number + 1}_START"],
         )
         for turn_number in range(1, turn_count)
@@ -1586,7 +1347,7 @@ def cl2_left_turnaround_segments(
     inner_segments = tuple(
         (
             points[f"TURN{turn_number}_LEFT_END"],
-            points[f"TURN{turn_number}_LEFT_DETOUR_VIA"],
+            points[f"TURN{turn_number}_LEFT_TURNAROUND_VIA"],
         )
         for turn_number in range(1, turn_count)
     )
@@ -2063,11 +1824,11 @@ def build_cl2_left_turnaround_plan(
         secondary_curve_segments(
             cfg,
             dimensions,
-            points[f"TURN{turn_number}_REV_LEFT_OUTER"],
+            points[f"TURN{turn_number}_RETURN_LEFT_OUTER"],
             points[f"TURN{turn_number}_LEFT_END"],
             1.0,
             outer_offsets[turn_number - 1],
-            station_start_x=points[f"TURN{turn_number}_REV_LEFT_OUTER"][0],
+            station_start_x=points[f"TURN{turn_number}_RETURN_LEFT_OUTER"][0],
             station_end_x=-half_span,
             mirror_phase_sign=False,
             amplitude_override=amplitude_override,
@@ -2093,7 +1854,7 @@ def build_cl2_left_turnaround_plan(
         rack_x = edge_x - (rack_offset * via_spacing)
         for rack_shift in rack_shifts:
             via_points = {
-                f"TURN{turn_number}_LEFT_DETOUR_VIA": (rack_x, via_y + rack_shift)
+                f"TURN{turn_number}_LEFT_TURNAROUND_VIA": (rack_x, via_y + rack_shift)
                 for turn_number, via_y in enumerate(
                     centered_positions(handoff_count, via_spacing), start=1
                 )
@@ -2243,11 +2004,11 @@ def build_cl2_left_channel_turnaround_plan(
         inner_path = secondary_curve_segments(
             cfg,
             dimensions,
-            points[f"TURN{inner_turn}_REV_LEFT_OUTER"],
+            points[f"TURN{inner_turn}_RETURN_LEFT_OUTER"],
             inner_end,
             1.0,
             outer_offsets[inner_turn - 1],
-            station_start_x=points[f"TURN{inner_turn}_REV_LEFT_OUTER"][0],
+            station_start_x=points[f"TURN{inner_turn}_RETURN_LEFT_OUTER"][0],
             station_end_x=-half_span,
             amplitude_override=amplitude_override,
         )
@@ -2265,7 +2026,7 @@ def build_cl2_left_channel_turnaround_plan(
     channel_x = min(*(point[0] for point in target_escapes + inner_escapes)) - via_spacing
     via_x = channel_x - via_spacing
     via_points = {
-        f"TURN{turn_number}_LEFT_DETOUR_VIA": (via_x, via_y)
+        f"TURN{turn_number}_LEFT_TURNAROUND_VIA": (via_x, via_y)
         for turn_number, via_y in enumerate(
             centered_positions(handoff_count, 2.0 * via_spacing), start=1
         )
@@ -2279,7 +2040,7 @@ def build_cl2_left_channel_turnaround_plan(
         routes: dict[int, tuple[Segment, ...]] = {}
         for handoff_index, (start, escape) in enumerate(zip(starts, escapes)):
             lane = (channel_x, first_lane_y + (handoff_index * trace_clearance))
-            via = via_points[f"TURN{handoff_index + 1}_LEFT_DETOUR_VIA"]
+            via = via_points[f"TURN{handoff_index + 1}_LEFT_TURNAROUND_VIA"]
             routes[handoff_index] = polyline_segments((start, escape, lane, via))
         return routes
 
@@ -2332,7 +2093,7 @@ def build_cl2_left_bundle_turnaround_plan(
     ) -> dict[int, tuple[Segment, ...]]:
         if handoff_count == 1:
             start = starts[0]
-            via = via_points["TURN1_LEFT_DETOUR_VIA"]
+            via = via_points["TURN1_LEFT_TURNAROUND_VIA"]
             route_length = abs(via[0] - start[0])
             control_1 = left_handoff_escape_point(
                 cfg,
@@ -2380,7 +2141,7 @@ def build_cl2_left_bundle_turnaround_plan(
         if tangent_start[0] > 0.0:
             tangent_start = (-tangent_start[0], -tangent_start[1])
         via_sequence = tuple(
-            via_points[f"TURN{turn_number}_LEFT_DETOUR_VIA"]
+            via_points[f"TURN{turn_number}_LEFT_TURNAROUND_VIA"]
             for turn_number in range(1, handoff_count + 1)
         )
         center_end = (
@@ -2447,7 +2208,7 @@ def build_cl2_left_bundle_turnaround_plan(
 
         for route_index, point_list in enumerate(route_points):
             point_list[0] = starts[route_index]
-            point_list[-1] = via_points[f"TURN{route_index + 1}_LEFT_DETOUR_VIA"]
+            point_list[-1] = via_points[f"TURN{route_index + 1}_LEFT_TURNAROUND_VIA"]
 
         return {
             route_index: polyline_segments(tuple(point_list))
@@ -2482,11 +2243,11 @@ def build_cl2_left_bundle_turnaround_plan(
         secondary_curve_segments(
             cfg,
             dimensions,
-            points[f"TURN{turn_number}_REV_LEFT_OUTER"],
+            points[f"TURN{turn_number}_RETURN_LEFT_OUTER"],
             points[f"TURN{turn_number}_LEFT_END"],
             1.0,
             outer_offsets[turn_number - 1],
-            station_start_x=points[f"TURN{turn_number}_REV_LEFT_OUTER"][0],
+            station_start_x=points[f"TURN{turn_number}_RETURN_LEFT_OUTER"][0],
             station_end_x=-half_span,
             mirror_phase_sign=False,
             amplitude_override=amplitude_override,
@@ -2498,7 +2259,7 @@ def build_cl2_left_bundle_turnaround_plan(
         y_step = math.sqrt((via_spacing * via_spacing) - (x_step * x_step))
         midpoint = (handoff_count - 1) / 2.0
         return {
-            f"TURN{turn_number}_LEFT_DETOUR_VIA": (
+            f"TURN{turn_number}_LEFT_TURNAROUND_VIA": (
                 center_x + ((turn_number - 1 - midpoint) * x_step),
                 (turn_number - 1 - midpoint) * y_step,
             )
@@ -2609,9 +2370,9 @@ def cl2_fixed_right_transition_geometry(
         right_inner = f"TURN{turn_number}_RIGHT_INNER"
         right_lower_via = f"TURN{turn_number}_RIGHT_LOWER_VIA"
         right_outer = f"TURN{turn_number}_RIGHT_OUTER"
-        reverse_right_outer = f"TURN{turn_number}_REV_RIGHT_OUTER"
-        reverse_right_upper_via = f"TURN{turn_number}_REV_RIGHT_UPPER_VIA"
-        reverse_target_start = f"TURN{turn_number}_REV_RIGHT_INNER"
+        reverse_right_outer = f"TURN{turn_number}_RETURN_RIGHT_OUTER"
+        reverse_right_upper_via = f"TURN{turn_number}_RETURN_RIGHT_UPPER_VIA"
+        reverse_target_start = f"TURN{turn_number}_RETURN_RIGHT_INNER"
         via_labels.extend((right_lower_via, reverse_right_upper_via))
         inner_segments.extend(
             (
@@ -2858,7 +2619,7 @@ def build_cl2_right_turnaround_plan(
                         column_turns[packed_column],
                         column_y_positions,
                     ):
-                        via_points[f"TURN{turn_index + 1}_RIGHT_DETOUR_VIA"] = (
+                        via_points[f"TURN{turn_index + 1}_RIGHT_TURNAROUND_VIA"] = (
                             column_x,
                             via_y,
                         )
@@ -2897,7 +2658,7 @@ def build_cl2_right_turnaround_plan(
                     fixed_inner_segments,
                 )
                 if not violations:
-                    # Preserved RIGHT_END/RIGHT_RUNUP anchors can force adjacent straight
+                    # Preserved right-end turnaround anchors can force adjacent straight
                     # fans below the nominal trace pitch for higher turn counts, so we
                     # optimize for the widest adjacent jog spacing here and reserve
                     # hard failures for actual copper/via clearance violations.
@@ -2970,7 +2731,7 @@ def build_multiturn_cl2_layout(
     dimensions: SensorDimensions,
     primary_geometry: PrimaryGeometry | None = None,
 ) -> SecondaryLayoutPlan:
-    """Build CL2 for all valid turn counts while keeping the legacy outer envelope."""
+    """Build CL2 for all valid turn counts using canonical descriptive anchors."""
     half_span = secondary_stroke_length(cfg) / 2.0
     quarter_span = half_span / 2.0
     outer_offsets = secondary_turn_offsets(cfg)
@@ -3006,7 +2767,7 @@ def build_multiturn_cl2_layout(
         )
 
     points: dict[str, Point] = {
-        "A": (terminal_x, terminal_output_y),
+        "TERMINAL_OUTPUT_VIA": (terminal_x, terminal_output_y),
     }
 
     turn_specs: list[dict[str, str | float]] = []
@@ -3030,18 +2791,18 @@ def build_multiturn_cl2_layout(
             "right_lower_via": f"TURN{turn_index + 1}_RIGHT_LOWER_VIA",
             "right_outer": f"TURN{turn_index + 1}_RIGHT_OUTER",
             "right_end": f"TURN{turn_index + 1}_RIGHT_END",
-            "right_runup": f"TURN{turn_index + 1}_RIGHT_RUNUP",
-            "right_detour": f"TURN{turn_index + 1}_RIGHT_DETOUR_VIA",
-            "reverse_right_outer": f"TURN{turn_index + 1}_REV_RIGHT_OUTER",
-            "reverse_right_upper_via": f"TURN{turn_index + 1}_REV_RIGHT_UPPER_VIA",
-            "reverse_target_start": f"TURN{turn_index + 1}_REV_RIGHT_INNER",
-            "reverse_target_end": f"TURN{turn_index + 1}_REV_LEFT_INNER",
-            "reverse_left_lower_via": f"TURN{turn_index + 1}_REV_LEFT_LOWER_VIA",
-            "reverse_left_outer": f"TURN{turn_index + 1}_REV_LEFT_OUTER",
+            "right_runup": f"TURN{turn_index + 1}_RIGHT_TURNAROUND_RUNUP",
+            "right_detour": f"TURN{turn_index + 1}_RIGHT_TURNAROUND_VIA",
+            "reverse_right_outer": f"TURN{turn_index + 1}_RETURN_RIGHT_OUTER",
+            "reverse_right_upper_via": f"TURN{turn_index + 1}_RETURN_RIGHT_UPPER_VIA",
+            "reverse_target_start": f"TURN{turn_index + 1}_RETURN_RIGHT_INNER",
+            "reverse_target_end": f"TURN{turn_index + 1}_RETURN_LEFT_INNER",
+            "reverse_left_lower_via": f"TURN{turn_index + 1}_RETURN_LEFT_LOWER_VIA",
+            "reverse_left_outer": f"TURN{turn_index + 1}_RETURN_LEFT_OUTER",
             "left_end": f"TURN{turn_index + 1}_LEFT_END",
         }
         if turn_index < len(outer_offsets) - 1:
-            labels["left_detour"] = f"TURN{turn_index + 1}_LEFT_DETOUR_VIA"
+            labels["left_detour"] = f"TURN{turn_index + 1}_LEFT_TURNAROUND_VIA"
             labels["end"] = f"TURN{turn_index + 2}_START"
         else:
             labels["end"] = f"TURN{turn_index + 1}_RETURN_START"
@@ -3256,10 +3017,10 @@ def build_multiturn_cl2_layout(
     # CL2 convergence route.
     fanout_spine_x = terminal_x + via_to_trace_clearance(cfg)
     fanout_spine = (fanout_spine_x, 0.0)
-    points["A_FANOUT_JOG"] = (fanout_spine_x, terminal_output_y)
-    points["ZP_FANOUT_JOG"] = (fanout_spine_x, terminal_return_y)
-    points["B"] = fanout_spine
-    points["ZO"] = fanout_spine
+    points["ENTRY_FANOUT_JOG"] = (fanout_spine_x, terminal_output_y)
+    points["RETURN_FANOUT_JOG"] = (fanout_spine_x, terminal_return_y)
+    points["ENTRY_CONVERGENCE_JOG"] = fanout_spine
+    points["RETURN_CONVERGENCE_JOG"] = fanout_spine
     local_left_detours = tuple(left_via_points.values())
     if local_left_detours:
         convergence_x = min(point[0] for point in local_left_detours) - via_to_trace_clearance(cfg)
@@ -3268,8 +3029,8 @@ def build_multiturn_cl2_layout(
             points["TURN1_START"][0],
             points[return_start_label][0],
         ) - trace_pitch(cfg)
-    points["CL2_FANOUT_CONVERGENCE"] = (convergence_x, 0.0)
-    points["ZP"] = (terminal_x, terminal_return_y)
+    points["FANOUT_CONVERGENCE"] = (convergence_x, 0.0)
+    points["TERMINAL_RETURN_VIA"] = (terminal_x, terminal_return_y)
 
     if fanout_direction(cfg) > 0:
         points = mirror_points_horizontally(points)
@@ -3302,7 +3063,7 @@ def build_multiturn_cl2_layout(
     target_reverse_paths: list[tuple[Segment, ...]] = []
     inner_forward_paths: list[tuple[Segment, ...]] = []
     inner_reverse_paths: list[tuple[Segment, ...]] = []
-    via_labels: list[str] = ["A"]
+    via_labels: list[str] = ["TERMINAL_OUTPUT_VIA"]
 
     for spec in turn_specs:
         outer_offset = float(spec["outer_offset"])
@@ -3456,13 +3217,13 @@ def build_multiturn_cl2_layout(
     detour_vias = tuple(
         points[label]
         for label in via_labels
-        if label not in ("A", "ZP")
+        if label not in ("TERMINAL_OUTPUT_VIA", "TERMINAL_RETURN_VIA")
     )
     left_detour_stack = tuple(
-        points[f"TURN{turn_number}_LEFT_DETOUR_VIA"]
+        points[f"TURN{turn_number}_LEFT_TURNAROUND_VIA"]
         for turn_number in range(1, cfg["number_of_secondary_turns"])
     )
-    convergence = points["CL2_FANOUT_CONVERGENCE"]
+    convergence = points["FANOUT_CONVERGENCE"]
     target_escape = route_cl2_fanout_wrap(
         cfg,
         convergence,
@@ -3484,20 +3245,20 @@ def build_multiturn_cl2_layout(
         detour_vias,
     )
     entry_escape_path = (
-        (points["A"], points["A_FANOUT_JOG"]),
-        (points["A_FANOUT_JOG"], points["B"]),
-        (points["B"], convergence),
+        (points["TERMINAL_OUTPUT_VIA"], points["ENTRY_FANOUT_JOG"]),
+        (points["ENTRY_FANOUT_JOG"], points["ENTRY_CONVERGENCE_JOG"]),
+        (points["ENTRY_CONVERGENCE_JOG"], convergence),
     ) + target_escape
     return_escape_path = tuple(
         (end, start) for start, end in reversed(return_escape)
     ) + (
-        (convergence, points["ZO"]),
-        (points["ZO"], points["ZP_FANOUT_JOG"]),
-        (points["ZP_FANOUT_JOG"], points["ZP"]),
+        (convergence, points["RETURN_CONVERGENCE_JOG"]),
+        (points["RETURN_CONVERGENCE_JOG"], points["RETURN_FANOUT_JOG"]),
+        (points["RETURN_FANOUT_JOG"], points["TERMINAL_RETURN_VIA"]),
     )
     target_segments[0:0] = entry_escape_path
     inner_segments.extend(return_escape_path)
-    via_labels.append("ZP")
+    via_labels.append("TERMINAL_RETURN_VIA")
 
     return SecondaryLayoutPlan(
         points=points,
@@ -3546,7 +3307,7 @@ def validate_multiturn_cl2_clearance(
                 )
 
     primary_pads = tuple(primary_geometry.pads.values())
-    for terminal in ("A", "ZP"):
+    for terminal in ("TERMINAL_OUTPUT_VIA", "TERMINAL_RETURN_VIA"):
         for primary_pad in primary_pads:
             if (
                 distance(layout.points[terminal], primary_pad)
@@ -3557,9 +3318,9 @@ def validate_multiturn_cl2_clearance(
 
     minimum_primary_trace_distance = osc1_via_trace_clearance(cfg)
     for via_label in layout.via_labels:
-        if via_label in ("A", "ZP"):
+        if via_label in ("TERMINAL_OUTPUT_VIA", "TERMINAL_RETURN_VIA"):
             continue
-        if via_label.endswith("_LEFT_DETOUR_VIA"):
+        if via_label.endswith("_LEFT_TURNAROUND_VIA"):
             # Temporary carve-out while CL1 and the primary are re-routed around the
             # mirrored left-side CL2 turnaround geometry.
             continue
@@ -3643,7 +3404,7 @@ def validate_multiturn_cl2_clearance(
                 + ROUTING_POLYGONAL_TOLERANCE_MM
                 < via_to_trace_clearance(cfg)
                 for via_label in layout.via_labels
-                if via_label not in ("A", "ZP")
+                if via_label not in ("TERMINAL_OUTPUT_VIA", "TERMINAL_RETURN_VIA")
             ):
                 raise ValueError(
                     f"CL2 {layer_name} fanout escape crowds a via."
@@ -3667,7 +3428,7 @@ def validate_multiturn_cl2_clearance(
         own_turn = (
             route_index % max(len(layout.left_target_handoff_paths), 1)
         ) + 1
-        own_via = layout.points[f"TURN{own_turn}_LEFT_DETOUR_VIA"]
+        own_via = layout.points[f"TURN{own_turn}_LEFT_TURNAROUND_VIA"]
         for via_label in layout.via_labels:
             via = layout.points[via_label]
             if via == own_via:
@@ -3688,72 +3449,6 @@ def validate_multiturn_cl2_clearance(
         raise ValueError(turnaround_violations[0])
 
 
-CL2_TWO_TURN_LEGACY_VIA_LABELS = (
-    "A",
-    "E",
-    "H",
-    "L",
-    "O",
-    "R",
-    "U",
-    "Y",
-    "ZB",
-    "ZE",
-    "ZI",
-    "ZL",
-    "ZP",
-)
-
-
-def cl2_two_turn_legacy_alias_points(points: dict[str, Point]) -> dict[str, Point]:
-    """Add historical fixed-2-turn CL2 labels to the generalized 2-turn point map."""
-    return with_point_aliases(
-        points,
-        {
-            "C": "TURN1_START",
-            "D": "TURN1_LEFT_OUTER",
-            "E": "TURN1_LEFT_UPPER_VIA",
-            "F": "TURN1_LEFT_INNER",
-            "G": "TURN1_RIGHT_INNER",
-            "H": "TURN1_RIGHT_LOWER_VIA",
-            "I": "TURN1_RIGHT_OUTER",
-            "J": "TURN1_RIGHT_END",
-            "K": "TURN1_RIGHT_RUNUP",
-            "L": "TURN1_RIGHT_DETOUR_VIA",
-            "M": "TURN1_RIGHT_RUNUP",
-            "N": "TURN1_REV_RIGHT_OUTER",
-            "O": "TURN1_REV_RIGHT_UPPER_VIA",
-            "P": "TURN1_REV_RIGHT_INNER",
-            "Q": "TURN1_REV_LEFT_INNER",
-            "R": "TURN1_REV_LEFT_LOWER_VIA",
-            "S": "TURN1_REV_LEFT_OUTER",
-            # These legacy fixed-2-turn labels now alias the live generalized left
-            # turnaround rather than the retired runup/recover gadget.
-            "T": "TURN1_LEFT_END",
-            "U": "TURN1_LEFT_DETOUR_VIA",
-            "V": "TURN2_START",
-            "W": "TURN2_START",
-            "X": "TURN2_LEFT_OUTER",
-            "Y": "TURN2_LEFT_UPPER_VIA",
-            "Z": "TURN2_LEFT_INNER",
-            "ZA": "TURN2_RIGHT_INNER",
-            "ZB": "TURN2_RIGHT_LOWER_VIA",
-            "ZC": "TURN2_RIGHT_OUTER",
-            "ZD": "TURN2_RIGHT_RUNUP",
-            "ZE": "TURN2_RIGHT_DETOUR_VIA",
-            "ZF": "TURN2_RIGHT_RUNUP",
-            "ZG": "TURN2_RIGHT_END",
-            "ZH": "TURN2_REV_RIGHT_OUTER",
-            "ZI": "TURN2_REV_RIGHT_UPPER_VIA",
-            "ZJ": "TURN2_REV_RIGHT_INNER",
-            "ZK": "TURN2_REV_LEFT_INNER",
-            "ZL": "TURN2_REV_LEFT_LOWER_VIA",
-            "ZM": "TURN2_REV_LEFT_OUTER",
-            "ZN": "TURN2_RETURN_START",
-        },
-    )
-
-
 def build_cl2_geometry(
     cfg: dict | None = None,
     primary_geometry: PrimaryGeometry | None = None,
@@ -3768,11 +3463,7 @@ def build_cl2_geometry(
     layout = build_multiturn_cl2_layout(cfg, dimensions, primary_geometry)
     if not should_skip_geometry_validation(cfg):
         validate_multiturn_cl2_clearance(cfg, dimensions, primary_geometry, layout)
-    points = layout.points
-    via_labels = layout.via_labels
-    if cfg["number_of_secondary_turns"] == 2:
-        points = cl2_two_turn_legacy_alias_points(layout.points)
-        via_labels = CL2_TWO_TURN_LEGACY_VIA_LABELS
+    points, via_labels = canonical_receiver_point_map(layout.points, layout.via_labels)
     return SecondaryCoil(
         name="CL2",
         target_layer=receiver_layers(cfg)[0],
@@ -3848,429 +3539,6 @@ def cl1_crossover_turn_half_height(
             return candidate
         candidate += search_step
     raise ValueError("CL1 crossover turn cannot clear CL2 within the OSC2 keep-out window.")
-
-
-# NOTE: Retained for historical reference and direct regression tests only.
-# The live CL1 generator now always uses build_multiturn_cl1_layout(),
-# including when number_of_secondary_turns == 2.
-def build_cl1_point_map(
-    cfg: dict,
-    dimensions: SensorDimensions,
-    cl2_geometry: SecondaryCoil | None = None,
-) -> dict[str, Point]:
-    """Construct the original annotated two-turn CL1 quadrature point map."""
-    half_span = secondary_stroke_length(cfg) / 2.0
-    amplitude = dimensions.secondary_width_mm / 2.0
-    pitch = trace_pitch(cfg)
-    half_pitch = pitch / 2.0
-    via_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    via_clearance = osc1_via_trace_clearance(cfg)
-    upper_via_y = -(primary_inner_half_height(cfg, dimensions) - via_clearance)
-    lower_via_y = -upper_via_y
-    left_x = -half_span
-    right_x, next_turn_x = cl1_right_end_columns(cfg)
-    transition_x = left_x + (secondary_stroke_length(cfg) * cfg["cl1_transition_column_fraction"])
-    midpoint_left_x = -(via_spacing / 2.0)
-    midpoint_right_x = via_spacing / 2.0
-    outer_top = -amplitude
-    outer_bottom = amplitude
-    phase_offset = math.pi / 2.0
-    pt_F = secondary_rail_point(
-        cfg, dimensions, midpoint_left_x, 1.0, half_pitch, phase_offset
-    )
-    pt_H = secondary_rail_point(
-        cfg, dimensions, midpoint_left_x, 1.0, -half_pitch, phase_offset
-    )
-    raw_pt_I = secondary_rail_point(
-        cfg, dimensions, right_x, 1.0, -half_pitch, phase_offset
-    )
-    pt_I = (right_x, raw_pt_I[1])
-    pt_P = secondary_rail_point(
-        cfg, dimensions, midpoint_right_x, -1.0, -half_pitch, phase_offset
-    )
-    pt_R = secondary_rail_point(
-        cfg, dimensions, midpoint_right_x, -1.0, half_pitch, phase_offset
-    )
-    pt_S = secondary_rail_point(
-        cfg, dimensions, transition_x, -1.0, half_pitch, phase_offset
-    )
-    pt_V = secondary_rail_point(
-        cfg, dimensions, transition_x, 1.0, -half_pitch, phase_offset
-    )
-    pt_W = secondary_rail_point(
-        cfg, dimensions, midpoint_right_x, 1.0, -half_pitch, phase_offset
-    )
-    pt_Y = secondary_rail_point(
-        cfg, dimensions, midpoint_right_x, 1.0, half_pitch, phase_offset
-    )
-    raw_pt_Z = secondary_rail_point(
-        cfg, dimensions, next_turn_x, 1.0, half_pitch, phase_offset
-    )
-    pt_Z = (next_turn_x, raw_pt_Z[1])
-    raw_pt_ZF = secondary_rail_point(
-        cfg, dimensions, next_turn_x, -1.0, half_pitch, phase_offset
-    )
-    pt_ZF = (next_turn_x, raw_pt_ZF[1])
-    pt_ZG = secondary_rail_point(
-        cfg, dimensions, midpoint_left_x, -1.0, half_pitch, phase_offset
-    )
-    pt_ZI = secondary_rail_point(
-        cfg, dimensions, midpoint_left_x, -1.0, -half_pitch, phase_offset
-    )
-    outer_turn_half_height = cl1_crossover_turn_half_height(
-        cfg, dimensions, cl2_geometry, right_x
-    )
-    next_turn_half_height = cl1_crossover_turn_half_height(
-        cfg, dimensions, cl2_geometry, next_turn_x
-    )
-
-    # CL1 is the straight-through row between the VIN and OSC1 terminals.
-    entrance_y = terminal_row_y(cfg, "CL1")
-    terminal_x = -((dimensions.primary_length_mm / 2.0) + cfg["terminal_escape_length_mm"])
-    terminal_y = terminal_row_y(cfg, "CL1")
-    return_terminal_y = terminal_row_y(cfg, "CL1-GND")
-    entry_b_x = terminal_x + cfg["terminal_escape_length_mm"]
-    return_zm_x = terminal_x + abs(return_terminal_y - entrance_y)
-    points: dict[str, Point] = {
-        "A": (terminal_x, terminal_y),
-        "B": (entry_b_x, entrance_y),
-        "C": (left_x, entrance_y),
-        "D": (left_x, lower_via_y),
-        "E": (left_x, outer_bottom),
-        "F": pt_F,
-        "G": (midpoint_left_x, upper_via_y),
-        "H": pt_H,
-        "I": pt_I,
-        "K": (right_x, outer_turn_half_height),
-        "L": (right_x, -outer_turn_half_height),
-        "O": (right_x, outer_top),
-        "P": pt_P,
-        "Q": (midpoint_right_x, lower_via_y),
-        "R": pt_R,
-        "S": pt_S,
-        "T": (transition_x, upper_via_y),
-        "U": (transition_x, lower_via_y),
-        "V": pt_V,
-        "W": pt_W,
-        "X": (midpoint_right_x, upper_via_y),
-        "Y": pt_Y,
-        "Z": pt_Z,
-        "ZB": (next_turn_x, next_turn_half_height),
-        "ZC": (next_turn_x, -next_turn_half_height),
-        "ZF": pt_ZF,
-        "ZG": pt_ZG,
-        "ZH": (midpoint_left_x, lower_via_y),
-        "ZI": pt_ZI,
-        "ZJ": (left_x, outer_top),
-        "ZK": (left_x, entrance_y - via_clearance),
-        "ZL": (left_x - via_clearance, entrance_y),
-        "ZM": (return_zm_x, entrance_y),
-        "ZN": (terminal_x, return_terminal_y),
-    }
-    if fanout_direction(cfg) > 0:
-        points = {label: (-point[0], point[1]) for label, point in points.items()}
-    return points
-
-
-def via_clearance_arc(cfg: dict, start: Point, end: Point, center: Point) -> Arc:
-    """Return an arc on the sensor-end side of a via at legal clearance."""
-    radius = osc1_via_trace_clearance(cfg)
-    sensor_end_direction = -fanout_direction(cfg)
-    return (
-        start,
-        (center[0] + (sensor_end_direction * radius), center[1]),
-        end,
-    )
-
-
-def outside_semicircle_arc(cfg: dict, start: Point, end: Point) -> Arc:
-    """Return a sensor-end-facing semicircle centered on the endpoint column."""
-    center_y = (start[1] + end[1]) / 2.0
-    radius = abs(start[1] - center_y)
-    sensor_end_direction = -fanout_direction(cfg)
-    return (
-        start,
-        (start[0] + (sensor_end_direction * radius), center_y),
-        end,
-    )
-
-
-def lower_fanout_via_arc(cfg: dict, start: Point, end: Point, center: Point) -> Arc:
-    """Return the quarter circle from below a via toward its fanout side."""
-    radius = osc1_via_trace_clearance(cfg)
-    fanout_side = fanout_direction(cfg)
-    diagonal_radius = radius / math.sqrt(2.0)
-    return (
-        start,
-        (
-            center[0] + (fanout_side * diagonal_radius),
-            center[1] - diagonal_radius,
-        ),
-        end,
-    )
-
-
-# NOTE: Retained for historical reference and direct regression tests only.
-# The live CL1 generator now always uses build_multiturn_cl1_layout(),
-# including when number_of_secondary_turns == 2.
-def build_cl1_routes(
-    cfg: dict,
-    dimensions: SensorDimensions,
-    points: dict[str, Point],
-) -> tuple[
-    tuple[Segment, ...],
-    tuple[Segment, ...],
-    tuple[Segment, ...],
-    tuple[Arc, ...],
-    tuple[Arc, ...],
-]:
-    """Return line and arc primitives for the original fixed-2-turn CL1 path."""
-    target_segments: list[Segment] = []
-    inner_segments: list[Segment] = []
-    crossover_segments: list[Segment] = []
-    inner_arcs: list[Arc] = []
-    pitch = trace_pitch(cfg)
-    half_pitch = pitch / 2.0
-    phase_offset = math.pi / 2.0
-    half_span = secondary_stroke_length(cfg) / 2.0
-    direction = fanout_direction(cfg)
-    left_x = direction * half_span
-    outer_turn_x, next_turn_x = cl1_right_end_columns(cfg)
-    outer_turn_x *= -direction
-    next_turn_x *= -direction
-    via_spacing = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    midpoint_left_x = direction * (via_spacing / 2.0)
-    midpoint_right_x = -direction * (via_spacing / 2.0)
-    transition_x = left_x - direction * (
-        secondary_stroke_length(cfg) * cfg["cl1_transition_column_fraction"]
-    )
-    station_x_map: dict[str, float] = {
-        "E": left_x, "F": midpoint_left_x,
-        "H": midpoint_left_x, "I": outer_turn_x,
-        "O": outer_turn_x, "P": midpoint_right_x,
-        "R": midpoint_right_x, "S": transition_x,
-        "V": transition_x, "W": midpoint_right_x,
-        "Y": midpoint_right_x, "Z": next_turn_x,
-        "ZF": next_turn_x, "ZG": midpoint_left_x,
-        "ZI": midpoint_left_x, "ZJ": left_x,
-    }
-
-    def line(collection: list[Segment], start: str, end: str) -> None:
-        collection.append((points[start], points[end]))
-
-    def curve(
-        collection: list[Segment],
-        start: str,
-        end: str,
-        phase_sign: float,
-        rail_offset: float,
-    ) -> None:
-        collection.extend(
-            secondary_curve_segments(
-                cfg,
-                dimensions,
-                points[start],
-                points[end],
-                phase_sign,
-                rail_offset,
-                station_start_x=station_x_map[start],
-                station_end_x=station_x_map[end],
-                phase_offset_radians=phase_offset,
-                mirror_phase_sign=False,
-            )
-        )
-
-    line(target_segments, "A", "B")
-    line(target_segments, "B", "C")
-    line(crossover_segments, "C", "D")
-    line(target_segments, "D", "E")
-    curve(target_segments, "E", "F", 1.0, half_pitch)
-    line(target_segments, "F", "G")
-    line(inner_segments, "G", "H")
-    curve(inner_segments, "H", "I", 1.0, -half_pitch)
-    line(inner_segments, "I", "K")
-    line(crossover_segments, "K", "L")
-    line(target_segments, "L", "O")
-    curve(target_segments, "O", "P", -1.0, -half_pitch)
-    line(target_segments, "P", "Q")
-    line(inner_segments, "Q", "R")
-    curve(inner_segments, "R", "S", -1.0, half_pitch)
-    line(inner_segments, "S", "T")
-    line(crossover_segments, "T", "U")
-    line(target_segments, "U", "V")
-    curve(target_segments, "V", "W", 1.0, -half_pitch)
-    line(target_segments, "W", "X")
-    line(inner_segments, "X", "Y")
-    curve(inner_segments, "Y", "Z", 1.0, half_pitch)
-    line(inner_segments, "Z", "ZB")
-    line(crossover_segments, "ZB", "ZC")
-    line(target_segments, "ZC", "ZF")
-    curve(target_segments, "ZF", "ZG", -1.0, half_pitch)
-    line(target_segments, "ZG", "ZH")
-    line(inner_segments, "ZH", "ZI")
-    curve(inner_segments, "ZI", "ZJ", -1.0, -half_pitch)
-    line(inner_segments, "ZJ", "ZK")
-    inner_arcs.append(lower_fanout_via_arc(cfg, points["ZK"], points["ZL"], points["C"]))
-    line(inner_segments, "ZL", "ZM")
-    line(inner_segments, "ZM", "ZN")
-    return (
-        tuple(target_segments),
-        tuple(inner_segments),
-        tuple(crossover_segments),
-        (),
-        tuple(inner_arcs),
-    )
-
-
-# NOTE: Retained for historical reference and direct regression tests only.
-# The live CL1 generator now always uses validate_multiturn_cl1_clearance(),
-# including when number_of_secondary_turns == 2.
-def validate_cl1_clearance(
-    cfg: dict,
-    dimensions: SensorDimensions,
-    primary_geometry: PrimaryGeometry,
-    cl2_geometry: SecondaryCoil | None,
-    points: dict[str, Point],
-    target_segments: tuple[Segment, ...],
-    inner_segments: tuple[Segment, ...],
-    crossover_segments: tuple[Segment, ...],
-    target_arcs: tuple[Arc, ...],
-    inner_arcs: tuple[Arc, ...],
-) -> None:
-    """Validate the original fixed-2-turn CL1 geometry."""
-    endpoint_clearance = (
-        (dimensions.primary_length_mm - secondary_stroke_length(cfg)) / 2.0
-    )
-    if endpoint_clearance + GEOMETRY_TOLERANCE_MM < cfg["cl1_primary_end_min_clearance_mm"]:
-        raise ValueError("CL1 endpoint violates minimum clearance to the primary end winding.")
-
-    minimum_pad_distance = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    cl1_vias = ("A", "C", "D", "G", "K", "L", "Q", "T", "U", "X", "ZB", "ZC", "ZH", "ZN")
-    for first_index, first in enumerate(cl1_vias):
-        for second in cl1_vias[first_index + 1:]:
-            if (
-                distance(points[first], points[second]) + GEOMETRY_TOLERANCE_MM
-                < minimum_pad_distance
-            ):
-                raise ValueError(
-                    f"CL1 paired vias {first}/{second} violate plated via clearance."
-                )
-
-    minimum_trace_distance = osc1_via_trace_clearance(cfg)
-    for via_label in ("G", "X", "Q", "ZH", "K", "L", "ZB", "ZC"):
-        nearest_primary_trace = min(
-            point_to_segment_distance(points[via_label], segment)
-            for coil in primary_geometry.coils
-            for segment in coil.body_segments
-        )
-        if nearest_primary_trace + GEOMETRY_TOLERANCE_MM < minimum_trace_distance:
-            raise ValueError(f"CL1 via {via_label} violates clearance to the primary winding.")
-
-    osc2 = next((coil for coil in primary_geometry.coils if coil.name == "OSC2"), None)
-    if osc2 is not None:
-        if path_to_path_distance(crossover_segments, osc2.body_segments) + GEOMETRY_TOLERANCE_MM < trace_pitch(cfg):
-            raise ValueError("CL1 crossover copper violates clearance to OSC2.")
-
-    if cl2_geometry is not None:
-        cl2_terminal_points = (cl2_geometry.points["A"], cl2_geometry.points["ZP"])
-        for terminal in ("A", "ZN"):
-            for point in cl2_terminal_points + tuple(primary_geometry.pads.values()):
-                if distance(points[terminal], point) + GEOMETRY_TOLERANCE_MM < minimum_pad_distance:
-                    raise ValueError(f"CL1 terminal {terminal} collides with an existing via.")
-
-    if cl2_geometry is not None:
-        cl2_segments = cl2_geometry.target_segments + cl2_geometry.inner_segments
-        for via_label in ("K", "L", "ZB", "ZC"):
-            nearest_cl2_trace = min(
-                point_to_segment_distance(points[via_label], segment)
-                for segment in cl2_segments
-            )
-            if nearest_cl2_trace + GEOMETRY_TOLERANCE_MM < minimum_trace_distance:
-                raise ValueError(
-                    f"CL1 crossover via {via_label} violates clearance to CL2."
-                )
-
-        same_layer_checks = (
-            (("I", "K"), cl2_geometry.inner_segments, cl2_geometry.inner_layer),
-            (("L", "O"), cl2_geometry.target_segments, cl2_geometry.target_layer),
-            (("Z", "ZB"), cl2_geometry.inner_segments, cl2_geometry.inner_layer),
-            (("ZC", "ZF"), cl2_geometry.target_segments, cl2_geometry.target_layer),
-        )
-        for (start, end), cl2_layer_segments, layer_name in same_layer_checks:
-            cl1_segment = (points[start], points[end])
-            nearest_cl2_trace = min(
-                segment_to_segment_distance(cl1_segment, segment)
-                for segment in cl2_layer_segments
-            )
-            if nearest_cl2_trace + GEOMETRY_TOLERANCE_MM < trace_pitch(cfg):
-                raise ValueError(
-                    f"CL1 segment {start}-{end} violates clearance on {layer_name}."
-                )
-
-    half_pitch = trace_pitch(cfg) / 2.0
-    phase_offset = math.pi / 2.0
-    half_span = secondary_stroke_length(cfg) / 2.0
-    direction = fanout_direction(cfg)
-    left_x = direction * half_span
-    outer_turn_x, next_turn_x = cl1_right_end_columns(cfg)
-    outer_turn_x *= -direction
-    next_turn_x *= -direction
-    via_spacing_val = cfg["via_diameter_mm"] + cfg["trace_spacing_mm"]
-    midpoint_left_x = direction * (via_spacing_val / 2.0)
-    midpoint_right_x = -direction * (via_spacing_val / 2.0)
-    transition_x = left_x - direction * (
-        secondary_stroke_length(cfg) * cfg["cl1_transition_column_fraction"]
-    )
-    station_x_map: dict[str, float] = {
-        "E": left_x, "F": midpoint_left_x,
-        "H": midpoint_left_x, "I": outer_turn_x,
-        "O": outer_turn_x, "P": midpoint_right_x,
-        "R": midpoint_right_x, "S": transition_x,
-        "V": transition_x, "W": midpoint_right_x,
-        "Y": midpoint_right_x, "Z": next_turn_x,
-        "ZF": next_turn_x, "ZG": midpoint_left_x,
-        "ZI": midpoint_left_x, "ZJ": left_x,
-    }
-    parallel_curves = (
-        (("E", "F", 1.0, half_pitch), ("V", "W", 1.0, -half_pitch)),
-        (("H", "I", 1.0, -half_pitch), ("Y", "Z", 1.0, half_pitch)),
-        (("O", "P", -1.0, -half_pitch), ("ZF", "ZG", -1.0, half_pitch)),
-        (("R", "S", -1.0, half_pitch), ("ZI", "ZJ", -1.0, -half_pitch)),
-    )
-    polygonal_transition_tolerance = 0.003
-    for first, second in parallel_curves:
-        first_curve = secondary_curve_segments(
-            cfg,
-            dimensions,
-            points[first[0]],
-            points[first[1]],
-            first[2],
-            first[3],
-            station_start_x=station_x_map[first[0]],
-            station_end_x=station_x_map[first[1]],
-            phase_offset_radians=phase_offset,
-            mirror_phase_sign=False,
-        )
-        second_curve = secondary_curve_segments(
-            cfg,
-            dimensions,
-            points[second[0]],
-            points[second[1]],
-            second[2],
-            second[3],
-            station_start_x=station_x_map[second[0]],
-            station_end_x=station_x_map[second[1]],
-            phase_offset_radians=phase_offset,
-            mirror_phase_sign=False,
-        )
-        actual_spacing = path_to_path_distance(first_curve, second_curve)
-        required_pitch = trace_pitch(cfg)
-        if actual_spacing + polygonal_transition_tolerance < required_pitch:
-            raise ValueError(
-                "CL1 parallel sinusoidal traces violate configured spacing: "
-                f"minimum centerline distance is {actual_spacing:.6f} mm, "
-                f"required pitch is {required_pitch:.6f} mm."
-            )
 
 
 def build_multiturn_cl1_layout(
@@ -4450,18 +3718,18 @@ def build_multiturn_cl1_layout(
         entry_route_y - left_lower_via_positions[0][1]
     )
     points: dict[str, Point] = {
-        "A": (terminal_x, entrance_y),
+        "TERMINAL_OUTPUT_VIA": (terminal_x, entrance_y),
         # CL1 enters on the same long fanout corridor as the Inner.1 return.
         # It leaves that corridor at a 45-degree tangent around the return
         # via, then approaches CL1_D on the target layer.
-        "A_FANOUT_JOG": (fanout_jog_x, entrance_y),
-        "B": (fanout_jog_x, entry_route_y),
-        "D_ENTRY_45_START": (entry_45_start_x, entry_route_y),
-        "D_ENTRY_45_END": (
+        "ENTRY_FANOUT_JOG": (fanout_jog_x, entrance_y),
+        "ENTRY_CORRIDOR_JOG": (fanout_jog_x, entry_route_y),
+        "ENTRY_RETURN_ESCAPE_TANGENT_START": (entry_45_start_x, entry_route_y),
+        "ENTRY_RETURN_ESCAPE_TANGENT_END": (
             entry_45_end_x,
             left_lower_via_positions[0][1],
         ),
-        "D": left_lower_via_positions[0],
+        "TURN1_LEFT_LOWER_VIA": left_lower_via_positions[0],
         "TURN1_START": point_at_station_x(
             secondary_rail_point(
                 cfg,
@@ -4493,22 +3761,22 @@ def build_multiturn_cl1_layout(
             "outer_offset": outer_offset,
             "inner_offset": inner_offset,
             "start": start_label,
-            "forward_mid_end": f"TURN{turn_index + 1}_FWD_MID_END",
-            "forward_mid_via": f"TURN{turn_index + 1}_FWD_MID_VIA",
-            "forward_inner_start": f"TURN{turn_index + 1}_FWD_INNER_START",
+            "forward_mid_end": f"TURN{turn_index + 1}_FORWARD_MID_END",
+            "forward_mid_via": f"TURN{turn_index + 1}_FORWARD_MID_VIA",
+            "forward_inner_start": f"TURN{turn_index + 1}_FORWARD_INNER_START",
             "right_end": f"TURN{turn_index + 1}_RIGHT_END",
             "right_upper_via": f"TURN{turn_index + 1}_RIGHT_UPPER_VIA",
             "right_lower_via": f"TURN{turn_index + 1}_RIGHT_LOWER_VIA",
-            "reverse_start": f"TURN{turn_index + 1}_REV_START",
-            "reverse_mid_end": f"TURN{turn_index + 1}_REV_MID_END",
-            "reverse_mid_via": f"TURN{turn_index + 1}_REV_MID_VIA",
-            "reverse_inner_start": f"TURN{turn_index + 1}_REV_INNER_START",
+            "reverse_start": f"TURN{turn_index + 1}_RETURN_START",
+            "reverse_mid_end": f"TURN{turn_index + 1}_RETURN_MID_END",
+            "reverse_mid_via": f"TURN{turn_index + 1}_RETURN_MID_VIA",
+            "reverse_inner_start": f"TURN{turn_index + 1}_RETURN_INNER_START",
             "left_return_end": f"TURN{turn_index + 1}_LEFT_RETURN_END",
             "left_upper_via": f"TURN{turn_index + 1}_LEFT_UPPER_VIA",
             "left_inner_entry_jog": f"TURN{turn_index + 1}_LEFT_INNER_ENTRY_JOG",
         }
         labels["left_lower_via"] = (
-            "D" if turn_index == 0 else f"TURN{turn_index + 1}_LEFT_LOWER_VIA"
+            "TURN1_LEFT_LOWER_VIA" if turn_index == 0 else f"TURN{turn_index + 1}_LEFT_LOWER_VIA"
         )
         labels["right_inner_entry_jog"] = f"TURN{turn_index + 1}_RIGHT_INNER_ENTRY_JOG"
         labels["right_crossover_jog"] = f"TURN{turn_index + 1}_RIGHT_CROSSOVER_JOG"
@@ -4637,8 +3905,6 @@ def build_multiturn_cl1_layout(
         left_lower_x, left_lower_y = left_lower_via_positions[turn_index]
         left_upper_x, left_upper_y = left_upper_via_positions[turn_index]
         points[str(labels["left_lower_via"])] = (left_lower_x, left_lower_y)
-        if turn_index == 0:
-            points["TURN1_LEFT_LOWER_VIA"] = points["D"]
         points[str(labels["left_upper_via"])] = (left_upper_x, left_upper_y)
         points[str(labels["left_inner_entry_jog"])] = (reverse_end_x, left_upper_y)
         if turn_index < len(turn_offsets) - 1:
@@ -4669,21 +3935,20 @@ def build_multiturn_cl1_layout(
 
     # The return leaves its local via horizontally on Inner.1.  It only turns
     # at the fanout spine, keeping it away from CL2's nearby local escape.
-    points["LEFT_RETURN_FANOUT_JOG"] = (fanout_jog_x, left_return_escape_point[1])
-    points["ZM"] = (fanout_jog_x, return_terminal_y)
-    points["ZN_JOG"] = (fanout_jog_x, return_terminal_y)
-    points["ZN"] = (terminal_x, return_terminal_y)
+    points["RETURN_FANOUT_JOG"] = (fanout_jog_x, left_return_escape_point[1])
+    points["RETURN_TERMINAL_JOG"] = (fanout_jog_x, return_terminal_y)
+    points["TERMINAL_RETURN_VIA"] = (terminal_x, return_terminal_y)
 
     if fanout_direction(cfg) > 0:
         points = mirror_points_horizontally(points)
 
     target_segments: list[Segment] = [
-        (points["A"], points["A_FANOUT_JOG"]),
-        (points["A_FANOUT_JOG"], points["B"]),
-        (points["B"], points["D_ENTRY_45_START"]),
-        (points["D_ENTRY_45_START"], points["D_ENTRY_45_END"]),
-        (points["D_ENTRY_45_END"], points["D"]),
-        (points["D"], points["TURN1_START"]),
+        (points["TERMINAL_OUTPUT_VIA"], points["ENTRY_FANOUT_JOG"]),
+        (points["ENTRY_FANOUT_JOG"], points["ENTRY_CORRIDOR_JOG"]),
+        (points["ENTRY_CORRIDOR_JOG"], points["ENTRY_RETURN_ESCAPE_TANGENT_START"]),
+        (points["ENTRY_RETURN_ESCAPE_TANGENT_START"], points["ENTRY_RETURN_ESCAPE_TANGENT_END"]),
+        (points["ENTRY_RETURN_ESCAPE_TANGENT_END"], points["TURN1_LEFT_LOWER_VIA"]),
+        (points["TURN1_LEFT_LOWER_VIA"], points["TURN1_START"]),
     ]
     inner_segments: list[Segment] = []
     crossover_segments: list[Segment] = []
@@ -4691,7 +3956,7 @@ def build_multiturn_cl1_layout(
     target_reverse_paths: list[tuple[Segment, ...]] = []
     inner_forward_paths: list[tuple[Segment, ...]] = []
     inner_reverse_paths: list[tuple[Segment, ...]] = []
-    via_labels: list[str] = ["A", "D"]
+    via_labels: list[str] = ["TERMINAL_OUTPUT_VIA", "TURN1_LEFT_LOWER_VIA"]
 
     for spec in turn_specs:
         outer_offset = float(spec["outer_offset"])
@@ -4833,23 +4098,23 @@ def build_multiturn_cl1_layout(
         )
 
     left_return_escape_via = str(turn_specs[-1]["left_return_escape_via"])
-    inner_segments.append((points[left_return_escape_via], points["LEFT_RETURN_FANOUT_JOG"]))
-    inner_segments.append((points["LEFT_RETURN_FANOUT_JOG"], points["ZN_JOG"]))
-    inner_segments.append((points["ZN_JOG"], points["ZN"]))
-    via_labels.extend((left_return_escape_via, "ZN"))
+    inner_segments.append((points[left_return_escape_via], points["RETURN_FANOUT_JOG"]))
+    inner_segments.append((points["RETURN_FANOUT_JOG"], points["RETURN_TERMINAL_JOG"]))
+    inner_segments.append((points["RETURN_TERMINAL_JOG"], points["TERMINAL_RETURN_VIA"]))
+    via_labels.extend((left_return_escape_via, "TERMINAL_RETURN_VIA"))
     left_via_labels.append(left_return_escape_via)
 
     entry_escape_path = (
-        (points["A"], points["A_FANOUT_JOG"]),
-        (points["A_FANOUT_JOG"], points["B"]),
-        (points["B"], points["D_ENTRY_45_START"]),
-        (points["D_ENTRY_45_START"], points["D_ENTRY_45_END"]),
-        (points["D_ENTRY_45_END"], points["D"]),
+        (points["TERMINAL_OUTPUT_VIA"], points["ENTRY_FANOUT_JOG"]),
+        (points["ENTRY_FANOUT_JOG"], points["ENTRY_CORRIDOR_JOG"]),
+        (points["ENTRY_CORRIDOR_JOG"], points["ENTRY_RETURN_ESCAPE_TANGENT_START"]),
+        (points["ENTRY_RETURN_ESCAPE_TANGENT_START"], points["ENTRY_RETURN_ESCAPE_TANGENT_END"]),
+        (points["ENTRY_RETURN_ESCAPE_TANGENT_END"], points["TURN1_LEFT_LOWER_VIA"]),
     )
     return_escape_path = (
-        (points[left_return_escape_via], points["LEFT_RETURN_FANOUT_JOG"]),
-        (points["LEFT_RETURN_FANOUT_JOG"], points["ZN_JOG"]),
-        (points["ZN_JOG"], points["ZN"]),
+        (points[left_return_escape_via], points["RETURN_FANOUT_JOG"]),
+        (points["RETURN_FANOUT_JOG"], points["RETURN_TERMINAL_JOG"]),
+        (points["RETURN_TERMINAL_JOG"], points["TERMINAL_RETURN_VIA"]),
     )
     if (
         min(
@@ -4919,7 +4184,7 @@ def validate_multiturn_cl1_clearance(
 
     minimum_trace_distance = osc1_via_trace_clearance(cfg)
     for via_label in layout.via_labels:
-        if via_label in ("A", "ZN"):
+        if via_label in ("TERMINAL_OUTPUT_VIA", "TERMINAL_RETURN_VIA"):
             continue
         nearest_primary_trace = min(
             point_to_segment_distance(layout.points[via_label], segment)
@@ -4939,8 +4204,11 @@ def validate_multiturn_cl1_clearance(
             raise ValueError("CL1 crossover copper violates clearance to OSC2.")
 
     if cl2_geometry is not None:
-        cl2_terminal_points = (cl2_geometry.points["A"], cl2_geometry.points["ZP"])
-        for terminal in ("A", "ZN"):
+        cl2_terminal_points = (
+            cl2_geometry.points["TERMINAL_OUTPUT_VIA"],
+            cl2_geometry.points["TERMINAL_RETURN_VIA"],
+        )
+        for terminal in ("TERMINAL_OUTPUT_VIA", "TERMINAL_RETURN_VIA"):
             for point in cl2_terminal_points + tuple(primary_geometry.pads.values()):
                 if (
                     distance(layout.points[terminal], point)
@@ -4998,60 +4266,6 @@ def validate_multiturn_cl1_clearance(
                 )
 
 
-CL1_TWO_TURN_LEGACY_VIA_LABELS = (
-    "A",
-    "D",
-    "G",
-    "K",
-    "L",
-    "Q",
-    "T",
-    "U",
-    "X",
-    "ZB",
-    "ZC",
-    "ZH",
-    "ZN",
-)
-
-
-def cl1_two_turn_legacy_alias_points(points: dict[str, Point]) -> dict[str, Point]:
-    """Add historical fixed-2-turn CL1 labels to the generalized 2-turn point map."""
-    return with_point_aliases(
-        points,
-        {
-            "E": "TURN1_START",
-            "F": "TURN1_FWD_MID_END",
-            "G": "TURN1_FWD_MID_VIA",
-            "H": "TURN1_FWD_INNER_START",
-            "I": "TURN1_RIGHT_END",
-            # Preserve the historical aliases' physical positions while the
-            # generalized labels describe the actual upper/lower side.
-            "K": "TURN1_RIGHT_LOWER_VIA",
-            "L": "TURN1_RIGHT_UPPER_VIA",
-            "O": "TURN1_REV_START",
-            "P": "TURN1_REV_MID_END",
-            "Q": "TURN1_REV_MID_VIA",
-            "R": "TURN1_REV_INNER_START",
-            "S": "TURN1_LEFT_RETURN_END",
-            "T": "TURN1_LEFT_UPPER_VIA",
-            "U": "TURN2_LEFT_LOWER_VIA",
-            "V": "TURN2_START",
-            "W": "TURN2_FWD_MID_END",
-            "X": "TURN2_FWD_MID_VIA",
-            "Y": "TURN2_FWD_INNER_START",
-            "Z": "TURN2_RIGHT_END",
-            "ZB": "TURN2_RIGHT_LOWER_VIA",
-            "ZC": "TURN2_RIGHT_UPPER_VIA",
-            "ZF": "TURN2_REV_START",
-            "ZG": "TURN2_REV_MID_END",
-            "ZH": "TURN2_REV_MID_VIA",
-            "ZI": "TURN2_REV_INNER_START",
-            "ZJ": "TURN2_LEFT_RETURN_END",
-        },
-    )
-
-
 def build_cl1_geometry(
     cfg: dict | None = None,
     primary_geometry: PrimaryGeometry | None = None,
@@ -5080,10 +4294,7 @@ def build_cl1_geometry(
             cl2_geometry,
             layout,
         )
-    points = layout.points
-    via_labels = layout.via_labels
-    if cfg["number_of_secondary_turns"] == 2:
-        points = cl1_two_turn_legacy_alias_points(layout.points)
+    points, via_labels = canonical_receiver_point_map(layout.points, layout.via_labels)
     return CL1Coil(
         name="CL1",
         target_layer=receiver_layers(cfg)[0],
@@ -5149,7 +4360,7 @@ def render_footprint(cfg: dict | None = None) -> str:
         sections.append(
             pad_thru_hole(
                 cfg["osc1_output_pad_name"],
-                geometry.pads["OSC1_A"],
+                geometry.pads["OSC1_TERMINAL_OUTPUT_VIA"],
                 cfg["via_diameter_mm"],
                 cfg["via_hole_size_mm"],
             )
@@ -5159,7 +4370,7 @@ def render_footprint(cfg: dict | None = None) -> str:
         sections.append(
             pad_thru_hole(
                 cfg["primary_input_pad_name"],
-                geometry.pads["VIN_U"],
+                geometry.pads["VIN_SHARED_VIA"],
                 cfg["via_diameter_mm"],
                 cfg["via_hole_size_mm"],
             )
@@ -5171,7 +4382,7 @@ def render_footprint(cfg: dict | None = None) -> str:
         sections.append(
             pad_thru_hole(
                 cfg["primary_input_pad_name"],
-                geometry.pads["VIN_V"],
+                geometry.pads["VIN_TERMINAL_VIA"],
                 cfg["via_diameter_mm"],
                 cfg["via_hole_size_mm"],
             )
@@ -5182,7 +4393,7 @@ def render_footprint(cfg: dict | None = None) -> str:
         sections.append(
             pad_thru_hole(
                 cfg["osc2_output_pad_name"],
-                geometry.pads["OSC2_A"],
+                geometry.pads["OSC2_TERMINAL_OUTPUT_VIA"],
                 cfg["via_diameter_mm"],
                 cfg["via_hole_size_mm"],
             )
@@ -5201,8 +4412,8 @@ def render_footprint(cfg: dict | None = None) -> str:
             )
         for label in cl2_geometry.via_labels:
             pad_name = {
-                "A": cfg["cl2_output_pad_name"],
-                "ZP": cfg["cl2_return_pad_name"],
+                "TERMINAL_OUTPUT_VIA": cfg["cl2_output_pad_name"],
+                "TERMINAL_RETURN_VIA": cfg["cl2_return_pad_name"],
             }.get(label, f"CL2_{label}")
             sections.append(
                 pad_thru_hole(
@@ -5237,8 +4448,8 @@ def render_footprint(cfg: dict | None = None) -> str:
             )
         for label in cl1_geometry.via_labels:
             pad_name = {
-                "A": cfg["cl1_output_pad_name"],
-                "ZN": cfg["cl1_return_pad_name"],
+                "TERMINAL_OUTPUT_VIA": cfg["cl1_output_pad_name"],
+                "TERMINAL_RETURN_VIA": cfg["cl1_return_pad_name"],
             }.get(label, f"CL1_{label}")
             sections.append(
                 pad_thru_hole(
