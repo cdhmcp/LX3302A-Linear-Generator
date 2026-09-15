@@ -41,7 +41,7 @@ PROPERTIES = {
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
-    "number_of_secondary_turns": 2,     # valid range: 1..5
+    "number_of_secondary_turns": 5,     # valid range: 1..5
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Trace & Via constraints 
@@ -161,6 +161,7 @@ class SecondaryLayoutPlan:
     inner_reverse_paths: tuple[tuple[Segment, ...], ...]
     left_target_handoff_paths: tuple[tuple[Segment, ...], ...]
     left_inner_handoff_paths: tuple[tuple[Segment, ...], ...]
+    left_handoff_station_x: dict[str, float]
     entry_escape_path: tuple[Segment, ...]
     return_escape_path: tuple[Segment, ...]
 
@@ -2061,7 +2062,11 @@ def build_cl2_left_bundle_turnaround_plan(
     points: dict[str, Point],
     outer_offsets: tuple[float, ...],
     amplitude_override: float,
-) -> tuple[dict[str, Point], dict[int, tuple[Segment, ...]], dict[int, tuple[Segment, ...]]]:
+) -> tuple[
+    dict[str, Point],
+    dict[int, tuple[Segment, ...]],
+    dict[int, tuple[Segment, ...]],
+]:
     """Fan left handoffs through two smooth, pitch-preserving trace bundles.
 
     The target and inner endpoints have opposite local rail normals, so a
@@ -2090,6 +2095,7 @@ def build_cl2_left_bundle_turnaround_plan(
         phase_sign: float,
         via_points: dict[str, Point],
         sample_count_override: int | None = None,
+        departure_tangent_scale: tuple[float, float] = (1.0, 1.0),
     ) -> dict[int, tuple[Segment, ...]]:
         if handoff_count == 1:
             start = starts[0]
@@ -2159,8 +2165,10 @@ def build_cl2_left_bundle_turnaround_plan(
             tangent_end = (-tangent_end[0], -tangent_end[1])
         control_length = abs(center_end[0] - center_start[0]) * 0.45
         control_1 = (
-            center_start[0] + (tangent_start[0] * control_length),
-            center_start[1] + (tangent_start[1] * control_length),
+            center_start[0]
+            + (tangent_start[0] * control_length * departure_tangent_scale[0]),
+            center_start[1]
+            + (tangent_start[1] * control_length * departure_tangent_scale[1]),
         )
         control_2 = (
             center_end[0] - (tangent_end[0] * control_length),
@@ -2318,25 +2326,37 @@ def build_cl2_left_bundle_turnaround_plan(
                     return False
         return True
 
-    # A centered 3-pitch vertical rack is the conservative fallback. A compact
-    # 2.5-pitch rack and diagonally staggered variants are evaluated when they
-    # satisfy the complete local trace/via clearance check.
-    rack_candidates = (
-        (3.0, 0.0),
-        (2.5, 0.0),
-        (2.5, -0.25),
-        (2.5, 0.25),
-        (2.5, -0.50),
-        (2.5, 0.50),
+    # The baseline cubic keeps the historical vertical and diagonal rack search.
+    # A peeled departure lets the outer routes clear their neighboring rails, so
+    # it receives a refined vertical-rack search in the otherwise blocked band.
+    bundle_candidates = tuple(
+        (center_pitch, step_pitch, (1.0, 1.0))
+        for center_pitch in (2.0, 2.25, 2.50, 2.75, 3.0)
+        for step_pitch in (0.0, -0.25, 0.25, -0.50, 0.50)
+    ) + tuple(
+        (center_pitch / 100.0, 0.0, (1.60, 1.34))
+        for center_pitch in range(225, 251)
     )
-    best_plan: tuple[float, dict[str, Point]] | None = None
-    for center_pitch, step_pitch in rack_candidates:
+    best_plan: tuple[float, dict[str, Point], tuple[float, float]] | None = None
+    for center_pitch, step_pitch, departure_tangent_scale in bundle_candidates:
         via_points = rack_points(
             source_edge_x - (center_pitch * via_spacing),
             step_pitch * via_spacing,
         )
-        target_routes = bundled_routes(target_starts, -1.0, via_points, 16)
-        inner_routes = bundled_routes(inner_starts, 1.0, via_points, 16)
+        target_routes = bundled_routes(
+            target_starts,
+            -1.0,
+            via_points,
+            16,
+            departure_tangent_scale,
+        )
+        inner_routes = bundled_routes(
+            inner_starts,
+            1.0,
+            via_points,
+            16,
+            departure_tangent_scale,
+        )
         if not routes_clear_candidate(via_points, target_routes, inner_routes):
             continue
         score = sum(
@@ -2344,18 +2364,156 @@ def build_cl2_left_bundle_turnaround_plan(
             for route in (*target_routes.values(), *inner_routes.values())
             for segment in route
         )
-        candidate = (score, via_points)
+        candidate = (score, via_points, departure_tangent_scale)
         if best_plan is None or candidate[0] < best_plan[0]:
             best_plan = candidate
 
     if best_plan is None:
         raise ValueError("CL2 left bundle turnaround could not satisfy configured clearance.")
-    _, via_points = best_plan
-    target_routes = bundled_routes(target_starts, -1.0, via_points)
-    inner_routes = bundled_routes(inner_starts, 1.0, via_points)
+    _, via_points, departure_tangent_scale = best_plan
+    target_routes = bundled_routes(
+        target_starts,
+        -1.0,
+        via_points,
+        departure_tangent_scale=departure_tangent_scale,
+    )
+    inner_routes = bundled_routes(
+        inner_starts,
+        1.0,
+        via_points,
+        departure_tangent_scale=departure_tangent_scale,
+    )
     if not routes_clear_candidate(via_points, target_routes, inner_routes):
         raise ValueError("CL2 left bundle turnaround lost clearance at render resolution.")
     return via_points, target_routes, inner_routes
+
+
+def build_cl2_trimmed_left_bundle_turnaround_plan(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    points: dict[str, Point],
+    outer_offsets: tuple[float, ...],
+    amplitude_override: float,
+) -> tuple[
+    dict[str, Point],
+    dict[int, tuple[Segment, ...]],
+    dict[int, tuple[Segment, ...]],
+    dict[str, Point],
+    dict[str, float],
+]:
+    """Choose the shortest legal CL2 left handoff with bounded on-rail trim."""
+    handoff_count = len(outer_offsets) - 1
+    if handoff_count <= 0:
+        return {}, {}, {}, {}, {}
+
+    half_span = secondary_stroke_length(cfg) / 2.0
+    via_spacing = secondary_via_spacing(cfg)
+    best_plan: tuple[
+        tuple[float, float, float],
+        dict[str, Point],
+        dict[int, tuple[Segment, ...]],
+        dict[int, tuple[Segment, ...]],
+        dict[str, Point],
+        dict[str, float],
+    ] | None = None
+
+    for fraction in (0.0, 0.25, 0.50, 0.75, 1.0):
+        trim = fraction * via_spacing
+        station_x = -half_span + trim
+        trimmed_points: dict[str, Point] = {}
+        stations: dict[str, float] = {}
+        for turn_number in range(2, handoff_count + 2):
+            label = f"TURN{turn_number}_START"
+            trimmed_points[label] = secondary_rail_point(
+                cfg,
+                dimensions,
+                station_x,
+                -1.0,
+                outer_offsets[turn_number - 1],
+                amplitude_override=amplitude_override,
+            )
+            stations[label] = station_x
+        for turn_number in range(1, handoff_count + 1):
+            label = f"TURN{turn_number}_LEFT_END"
+            trimmed_points[label] = secondary_rail_point(
+                cfg,
+                dimensions,
+                station_x,
+                1.0,
+                outer_offsets[turn_number - 1],
+                amplitude_override=amplitude_override,
+            )
+            stations[label] = station_x
+
+        candidate_points = {**points, **trimmed_points}
+        try:
+            via_points, target_routes, inner_routes = build_cl2_left_bundle_turnaround_plan(
+                cfg,
+                dimensions,
+                candidate_points,
+                outer_offsets,
+                amplitude_override,
+            )
+        except ValueError:
+            continue
+        route_length = sum(
+            distance(*segment)
+            for route in (*target_routes.values(), *inner_routes.values())
+            for segment in route
+        )
+        # Score the complete changed portion of the winding, rather than only
+        # the via handoff.  A later rail station shortens the sine section it
+        # replaces, so that saving must participate in the route-length goal.
+        sine_length = sum(
+            distance(*segment)
+            for turn_number in range(2, handoff_count + 2)
+            for segment in secondary_curve_segments(
+                cfg,
+                dimensions,
+                candidate_points[f"TURN{turn_number}_START"],
+                candidate_points[f"TURN{turn_number}_LEFT_OUTER"],
+                -1.0,
+                outer_offsets[turn_number - 1],
+                station_start_x=stations[f"TURN{turn_number}_START"],
+                station_end_x=candidate_points[f"TURN{turn_number}_LEFT_OUTER"][0],
+                amplitude_override=amplitude_override,
+            )
+        ) + sum(
+            distance(*segment)
+            for turn_number in range(1, handoff_count + 1)
+            for segment in secondary_curve_segments(
+                cfg,
+                dimensions,
+                candidate_points[f"TURN{turn_number}_RETURN_LEFT_OUTER"],
+                candidate_points[f"TURN{turn_number}_LEFT_END"],
+                1.0,
+                outer_offsets[turn_number - 1],
+                station_start_x=candidate_points[
+                    f"TURN{turn_number}_RETURN_LEFT_OUTER"
+                ][0],
+                station_end_x=stations[f"TURN{turn_number}_LEFT_END"],
+                amplitude_override=amplitude_override,
+            )
+        )
+        rack_center_x = sum(point[0] for point in via_points.values()) / handoff_count
+        candidate = (
+            (route_length + sine_length, trim, -rack_center_x),
+            via_points,
+            target_routes,
+            inner_routes,
+            trimmed_points,
+            stations,
+        )
+        if best_plan is None or candidate[0] < best_plan[0]:
+            best_plan = candidate
+
+    if best_plan is None:
+        raise ValueError(
+            "CL2 left bundle turnaround could not satisfy configured clearance "
+            "within one via-spacing of endpoint trim."
+        )
+    _, via_points, target_routes, inner_routes, trimmed_points, stations = best_plan
+    return via_points, target_routes, inner_routes, trimmed_points, stations
 
 
 def cl2_fixed_right_transition_geometry(
@@ -3000,14 +3158,20 @@ def build_multiturn_cl2_layout(
 
         turn_specs.append(labels)
 
-    left_via_points, left_target_routes, left_inner_routes = build_cl2_left_bundle_turnaround_plan(
+    (
+        left_via_points,
+        left_target_routes,
+        left_inner_routes,
+        left_trimmed_points,
+        left_handoff_station_x,
+    ) = build_cl2_trimmed_left_bundle_turnaround_plan(
         cfg,
         dimensions,
         points,
         outer_offsets,
         amplitude_override,
     )
-    points = {**points, **left_via_points}
+    points = {**points, **left_trimmed_points, **left_via_points}
     return_start_label = str(turn_specs[-1]["end"])
     # Both external CL2 traces meet the fanout at the same y=0 spine.  They
     # occupy different receiver layers, so this deliberately creates a common
@@ -3034,6 +3198,10 @@ def build_multiturn_cl2_layout(
 
     if fanout_direction(cfg) > 0:
         points = mirror_points_horizontally(points)
+        left_handoff_station_x = {
+            label: -station_x
+            for label, station_x in left_handoff_station_x.items()
+        }
         left_target_routes = {
             handoff_index: mirror_segments_horizontally(route)
             for handoff_index, route in left_target_routes.items()
@@ -3094,7 +3262,9 @@ def build_multiturn_cl2_layout(
             points[left_outer],
             -1.0,
             outer_offset,
-            station_start_x=points[start_label][0],
+            station_start_x=left_handoff_station_x.get(
+                start_label, points[start_label][0]
+            ),
             station_end_x=points[left_outer][0],
             amplitude_override=amplitude_override,
         )
@@ -3174,7 +3344,7 @@ def build_multiturn_cl2_layout(
             1.0,
             outer_offset,
             station_start_x=points[reverse_left_outer][0],
-            station_end_x=points[left_end][0],
+            station_end_x=left_handoff_station_x.get(left_end, points[left_end][0]),
             amplitude_override=amplitude_override,
         )
         inner_segments.extend(left_inner_end)
@@ -3277,6 +3447,7 @@ def build_multiturn_cl2_layout(
             left_inner_routes[handoff_index]
             for handoff_index in sorted(left_inner_routes)
         ),
+        left_handoff_station_x=left_handoff_station_x,
         entry_escape_path=entry_escape_path,
         return_escape_path=return_escape_path,
     )
@@ -3643,6 +3814,36 @@ def build_multiturn_cl1_layout(
         )
 
     left_upper_via_positions = plan_left_upper_vias()
+
+    def left_return_escape_geometry(
+        lower_via: Point,
+    ) -> tuple[Point, tuple[Segment, ...]]:
+        """Return the CL1 return-via location and entry path for one lower-via height."""
+        return_escape = (
+            left_columns[0] - via_pitch,
+            lower_via[1] + via_clearance,
+        )
+        entry_45_start_x = return_escape[0] - (via_clearance * math.sqrt(2.0))
+        entry_45_end_x = entry_45_start_x + (return_escape[1] - lower_via[1])
+        entry_path = (
+            ((terminal_x, entrance_y), (terminal_x + via_clearance, entrance_y)),
+            ((terminal_x + via_clearance, entrance_y), (terminal_x + via_clearance, return_escape[1])),
+            ((terminal_x + via_clearance, return_escape[1]), (entry_45_start_x, return_escape[1])),
+            ((entry_45_start_x, return_escape[1]), (entry_45_end_x, lower_via[1])),
+            ((entry_45_end_x, lower_via[1]), lower_via),
+        )
+        return return_escape, entry_path
+
+    def left_return_escape_is_clear(lower_via: Point) -> bool:
+        return_escape, entry_path = left_return_escape_geometry(lower_via)
+        if not transition_point_is_clear(return_escape):
+            return False
+        return cl2_geometry is None or (
+            path_to_path_distance(entry_path, cl2_geometry.target_segments)
+            + GEOMETRY_TOLERANCE_MM
+            >= trace_pitch(cfg)
+        )
+
     left_lower_via_positions: list[Point] = []
     for turn_index, left_column in enumerate(left_columns):
         position = transition_rack_positions((turn_index,), left_column, 1.0)
@@ -3650,15 +3851,25 @@ def build_multiturn_cl1_layout(
             raise ValueError(
                 f"CL1 TURN{turn_index + 1} left lower via cannot clear the routing envelope."
             )
-        left_lower_via_positions.append(position[0])
+        lower_via = position[0]
+        if turn_index == 0:
+            candidate_via = lower_via
+            while candidate_via[1] <= max_rack_y + GEOMETRY_TOLERANCE_MM:
+                if (
+                    transition_point_is_clear(candidate_via)
+                    and left_return_escape_is_clear(candidate_via)
+                ):
+                    lower_via = candidate_via
+                    break
+                candidate_via = (candidate_via[0], candidate_via[1] + 0.05)
+            else:
+                raise ValueError("CL1 left return escape via cannot clear the routing envelope.")
+        left_lower_via_positions.append(lower_via)
 
     # Place the return-exit via one via-to-trace clearance below CL1_D.  The
     # target-layer entry can then pass directly above the via at its required
     # clearance while CL2's nearby inner-layer return remains clear.
-    left_return_escape_point = (
-        left_columns[0] - via_pitch,
-        left_lower_via_positions[0][1] + via_clearance,
-    )
+    left_return_escape_point, _ = left_return_escape_geometry(left_lower_via_positions[0])
     if not transition_point_is_clear(left_return_escape_point):
         raise ValueError("CL1 left return escape via cannot clear the routing envelope.")
     positive_rail_spans: list[tuple[float, float, float]] = []

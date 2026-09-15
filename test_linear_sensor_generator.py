@@ -13,14 +13,14 @@ import linear_sensor_generator as generator
 FINGERPRINTS = {
     "1:9:left": "89580883348a793200a11ff24875bf5a075b8ca95fd124508007ea55e8be43ec",
     "1:9:right": "0742456b9839d40708e8606d7d1ce3547ad1dc003644a54f28ba7d0df7ccaf2a",
-    "2:9:left": "5e7bd7c7ca319c6fb3df9c7456872795e81abd9d415d37aa1895200cd85642de",
-    "2:9:right": "1bd5e2f4fdbe6ddbb7ae0c7f6e40a46f990f8acbfe597fb17f3b6e3aa2c142e7",
-    "3:9:left": "91b53292207e4ad202c3da66f7e287eef9d8ad2e91eb86e30ba239b4f4f83d59",
-    "3:9:right": "6585164644adda4ba6247a847570f3f51eb74bfd6a6793ee91f23d364a6c21c4",
-    "4:12:left": "a211f91577f8cf35fd71377e4e86af91ac2303cc9e9c9f0cd4c81a850a0c8812",
-    "4:12:right": "51316dac57265f36a87e2fe35cbab5759ed36bba724789889b50eb9b1be1f39a",
-    "5:13:left": "73510c51a5269ecb1f256d8adaa957114d3b89bbf0a613364ecb04111902442b",
-    "5:13:right": "81085604acc327e2b08472903b98ea5981373fc39039fdc3f5b72fb4f7199b8e",
+    "2:9:left": "b9f02254c6dee13e768e5297f6b016d98db30beb7a04599fcdd27d3d841f78f6",
+    "2:9:right": "3de0e60d64c71ca48fa2fdd768a66630ba388dce20197a3071c36e092a853882",
+    "3:9:left": "43a1ed11a7aa886eaff22af5ad4917fea084e38fcb903fa6ba475707c7095c68",
+    "3:9:right": "1263bfb7bdeabc95f083158cb4f4bdf3186c6558d2bd56578571aa2b1efb3c41",
+    "4:12:left": "0c7191ffa8432f41799827c4e1a8c6f1a5d3ac00b7473cfe5fc11275a1a284f8",
+    "4:12:right": "19c8fc0961bec3ee82baee3f24b538bd305523604097612af62bad0daf651ecd",
+    "5:13:left": "d460d6e8579fb70373ea2c17e958608d7440030c558abe71459bd352e9fdf6b8",
+    "5:13:right": "8139035705885fb321eaf59f1f4541df2f3d019cf54da4b5ceab6f3159f19931",
 }
 
 
@@ -110,6 +110,54 @@ class NamingAndGeometryTests(unittest.TestCase):
                         label.endswith("_VIA"),
                         f"{coil.name} via label {label} must end in _VIA",
                     )
+
+    def test_cl2_left_turnaround_uses_on_rail_trim_and_compacts_five_turn_rack(self):
+        cfg = generator.build_config(
+            {
+                "number_of_secondary_turns": 5,
+                "target_y_mm": 13.0,
+                "allow_invalid_geometry": True,
+            }
+        )
+        dimensions = generator.calculate_dimensions(cfg)
+        primary = generator.build_primary_geometry(cfg)
+        layout = generator.build_multiturn_cl2_layout(cfg, dimensions, primary)
+        half_span = generator.secondary_stroke_length(cfg) / 2.0
+        via_pitch = generator.secondary_via_spacing(cfg)
+        offsets = generator.secondary_turn_offsets(cfg)
+        amplitude = generator.secondary_wave_amplitude_for_offsets(dimensions, offsets)
+
+        for label, station_x in layout.left_handoff_station_x.items():
+            turn = int(label.removeprefix("TURN").split("_", 1)[0])
+            phase_sign = -1.0 if label.endswith("_START") else 1.0
+            expected = generator.secondary_rail_point(
+                cfg,
+                dimensions,
+                station_x,
+                phase_sign,
+                offsets[turn - 1],
+                amplitude_override=amplitude,
+            )
+            self.assertEqual(layout.points[label], expected)
+            self.assertGreaterEqual(station_x, half_span * -1.0)
+            self.assertLessEqual(station_x, (-half_span) + via_pitch)
+
+        rack = [
+            layout.points[f"TURN{turn}_LEFT_TURNAROUND_VIA"]
+            for turn in range(1, 5)
+        ]
+        rack_x = rack[0][0]
+        self.assertTrue(all(point[0] == rack_x for point in rack))
+        self.assertAlmostEqual(rack_x, -46.65071333716286, places=6)
+        for first, second in zip(rack, rack[1:]):
+            self.assertAlmostEqual(second[1] - first[1], via_pitch)
+
+        generator.validate_multiturn_cl2_clearance(cfg, dimensions, primary, layout)
+
+        for handoff_index, route in enumerate(layout.left_target_handoff_paths):
+            self.assertEqual(route[0][0], layout.points[f"TURN{handoff_index + 2}_START"])
+        for handoff_index, route in enumerate(layout.left_inner_handoff_paths):
+            self.assertEqual(route[0][0], layout.points[f"TURN{handoff_index + 1}_LEFT_END"])
 
     def test_generated_receiver_intermediate_pads_have_exactly_one_coil_prefix(self):
         cfg, _, cl1, cl2 = self.geometry(5, 13.0)
