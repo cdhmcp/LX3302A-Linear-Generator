@@ -1,2 +1,5 @@
 __pycache__/
 *.kicad_mod
+*.egg-info/
+build/
+dist/
