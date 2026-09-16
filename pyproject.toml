@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ips-sensor-gui"
+version = "0.1.0"
+description = "Desktop and core tooling for Microchip inductive position sensor footprints"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Microchip" }]
+dependencies = []
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.8"]
+package = ["PyInstaller>=6.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+ips-sensor-gui = "ips_sensor.gui.app:main"
+ips-sensor-generate = "ips_sensor.cli:main"
+
+[tool.setuptools]
+py-modules = ["linear_sensor_generator", "ips_sensor_gui"]
+
+[tool.setuptools.packages.find]
+include = ["ips_sensor*"]
