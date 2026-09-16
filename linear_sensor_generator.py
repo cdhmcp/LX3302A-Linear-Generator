@@ -31,17 +31,17 @@ Arc = tuple[Point, Point, Point]
 PROPERTIES = {
     # Moving target and stroke inputs
     "target_x_mm": 20.0,            # target width
-    "target_y_mm": 13.0,             # target height
-    "stroke_range_mm": 90.0,        # typically total mechanical travel of target + width of target for best primary-to-secondary coupling
+    "target_y_mm": 11.0,             # target height
+    "stroke_range_mm": 70.0,        # typically total mechanical travel of target + width of target for best primary-to-secondary coupling
     "target_side": "top",           # valid options: top OR bottom
 
     # Primary oscillator settings
-    "primary_end_extension_mm": 3.0,    # this is how far the primary extends past the secondary windings on either end of the sensor
+    "primary_end_extension_mm": 0.0,    # 0 selects the minimum symmetric clearance from CL2 turnaround vias
     "primary_y_margin_mm": 0.075,       # this is how far the primary extends past the secondary windings in the vertical (y) direction
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
-    "number_of_secondary_turns": 2,     # valid range: 1..5
+    "number_of_secondary_turns": 4,     # valid range: 1..5
     "secondary_y_reduction_mm": 1.5,    # this is subracted from target_y_mm to give the height/amplitude of the secondary windings, windings slightly smaller than the target is best practice
 
     # Trace & Via constraints 
@@ -216,8 +216,18 @@ def calculate_dimensions(cfg: dict) -> SensorDimensions:
     """Calculate receiver reference bounds and the primary outer centerline."""
     secondary_length = cfg["stroke_range_mm"]
     secondary_width = cfg["target_y_mm"] - cfg["secondary_y_reduction_mm"]
-    primary_length = secondary_length + (2.0 * cfg["primary_end_extension_mm"])
     primary_width = secondary_width + (2.0 * cfg["primary_y_margin_mm"])
+    provisional_dimensions = SensorDimensions(
+        secondary_length_mm=secondary_length,
+        secondary_width_mm=secondary_width,
+        primary_length_mm=secondary_length,
+        primary_width_mm=primary_width,
+    )
+    primary_end_extension = effective_primary_end_extension(
+        cfg,
+        provisional_dimensions,
+    )
+    primary_length = secondary_length + (2.0 * primary_end_extension)
     return SensorDimensions(
         secondary_length_mm=secondary_length,
         secondary_width_mm=secondary_width,
@@ -549,7 +559,6 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         "target_x_mm",
         "target_y_mm",
         "stroke_range_mm",
-        "primary_end_extension_mm",
         "primary_y_margin_mm",
         "trace_width_mm",
         "trace_spacing_mm",
@@ -564,7 +573,7 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
     for name in positive_values:
         if cfg[name] <= 0:
             raise ValueError(f"{name} must be > 0.")
-    for name in ("secondary_y_reduction_mm",):
+    for name in ("primary_end_extension_mm", "secondary_y_reduction_mm"):
         if cfg[name] < 0:
             raise ValueError(f"{name} must be >= 0.")
 
@@ -1312,20 +1321,25 @@ def cl2_right_turnaround_segments(
     return via_labels, target_segments, inner_segments
 
 
-def cl2_left_turnaround_via_points(cfg: dict) -> dict[str, Point]:
-    """Return the provisional mirrored left-side jog-via column in the left-entry frame."""
-    turn_count = cfg["number_of_secondary_turns"]
-    if turn_count <= 1:
+def cl2_left_turnaround_via_points(
+    cfg: dict,
+    dimensions: SensorDimensions,
+) -> dict[str, Point]:
+    """Return the exact CL2 left-turnaround vias before oscillator geometry exists."""
+    if not cfg["generate_cl2"] or cfg["number_of_secondary_turns"] <= 1:
         return {}
-    via_spacing = secondary_via_spacing(cfg)
-    left_column_x = -((secondary_stroke_length(cfg) / 2.0) + via_spacing)
-    return {
-        f"TURN{turn_number}_LEFT_TURNAROUND_VIA": (left_column_x, via_y)
-        for turn_number, via_y in enumerate(
-            centered_positions(turn_count - 1, via_spacing),
-            start=1,
-        )
-    }
+    points, outer_offsets, amplitude_override = cl2_left_turnaround_seed_points(
+        cfg,
+        dimensions,
+    )
+    via_points, _, _ = build_cl2_left_bundle_turnaround_plan(
+        cfg,
+        dimensions,
+        points,
+        outer_offsets,
+        amplitude_override,
+    )
+    return via_points
 
 
 def cl2_left_turnaround_segments(
@@ -2358,6 +2372,110 @@ def build_cl2_left_bundle_turnaround_plan(
     return via_points, target_routes, inner_routes
 
 
+def cl2_left_turnaround_seed_points(
+    cfg: dict,
+    dimensions: SensorDimensions,
+) -> tuple[dict[str, Point], tuple[float, ...], float]:
+    """Build the CL2 anchors needed to plan the left turnaround before OSCs."""
+    half_span = secondary_stroke_length(cfg) / 2.0
+    quarter_span = half_span / 2.0
+    outer_offsets = secondary_turn_offsets(cfg)
+    quarter_shifts = cl2_quarter_column_shifts(cfg)
+    amplitude_override = secondary_wave_amplitude_for_offsets(dimensions, outer_offsets)
+    points: dict[str, Point] = {}
+
+    for turn_index, outer_offset in enumerate(outer_offsets):
+        turn_number = turn_index + 1
+        shift = quarter_shifts[turn_index]
+        left_column_x = -quarter_span + shift
+        reverse_left_column_x = -quarter_span - shift
+        points[f"TURN{turn_number}_START"] = secondary_rail_point(
+            cfg,
+            dimensions,
+            -half_span,
+            -1.0,
+            outer_offset,
+            amplitude_override=amplitude_override,
+        )
+        points[f"TURN{turn_number}_LEFT_OUTER"] = point_at_station_x(
+            secondary_rail_point(
+                cfg,
+                dimensions,
+                left_column_x,
+                -1.0,
+                outer_offset,
+                amplitude_override=amplitude_override,
+            ),
+            left_column_x,
+        )
+        points[f"TURN{turn_number}_RETURN_LEFT_OUTER"] = point_at_station_x(
+            secondary_rail_point(
+                cfg,
+                dimensions,
+                reverse_left_column_x,
+                1.0,
+                outer_offset,
+                amplitude_override=amplitude_override,
+            ),
+            reverse_left_column_x,
+        )
+        points[f"TURN{turn_number}_LEFT_END"] = secondary_rail_point(
+            cfg,
+            dimensions,
+            -half_span,
+            1.0,
+            outer_offset,
+            amplitude_override=amplitude_override,
+        )
+
+    return points, outer_offsets, amplitude_override
+
+
+def minimum_primary_end_extension(
+    cfg: dict,
+    dimensions: SensorDimensions,
+) -> float:
+    """Return the per-side OSC extension required by all CL2 turnaround geometry."""
+    if not cfg["generate_cl2"]:
+        return 0.0
+    inner_turn_inset = (cfg["number_of_primary_turns"] - 1) * trace_pitch(cfg)
+    via_clearance = osc1_via_trace_clearance(cfg)
+    via_points = cl2_left_turnaround_via_points(cfg, dimensions)
+    left_turnaround_extension = (
+        max(abs(point[0]) for point in via_points.values())
+        + inner_turn_inset
+        + via_clearance
+        - (dimensions.secondary_length_mm / 2.0)
+        if via_points
+        else 0.0
+    )
+    # The right-side turnaround needs one via pitch beyond the receiver end.
+    right_turnaround_extension = secondary_via_spacing(cfg) + inner_turn_inset + via_clearance
+    return max(0.0, left_turnaround_extension, right_turnaround_extension)
+
+
+def effective_primary_end_extension(
+    cfg: dict,
+    dimensions: SensorDimensions,
+) -> float:
+    """Resolve automatic or user-specified symmetric OSC end extension."""
+    minimum_extension = max(
+        minimum_primary_end_extension(cfg, dimensions),
+        cfg["cl1_primary_end_min_clearance_mm"],
+    )
+    requested_extension = cfg["primary_end_extension_mm"]
+    if requested_extension == 0.0:
+        return minimum_extension
+    if requested_extension + GEOMETRY_TOLERANCE_MM < minimum_extension:
+        raise ValueError(
+            "primary_end_extension_mm="
+            f"{requested_extension:.6f} mm is below the minimum viable "
+            f"extension of {minimum_extension:.6f} mm; set "
+            "primary_end_extension_mm to 0 for the minimum viable setting."
+        )
+    return requested_extension
+
+
 def cl2_fixed_right_transition_geometry(
     points: dict[str, Point],
     turn_count: int,
@@ -3000,6 +3118,10 @@ def build_multiturn_cl2_layout(
 
         turn_specs.append(labels)
 
+    # Reuse the pre-primary seed anchors so the OSC envelope calculation and
+    # emitted CL2 turnaround are driven by the same exact geometry.
+    left_seed_points, _, _ = cl2_left_turnaround_seed_points(cfg, dimensions)
+    points.update(left_seed_points)
     left_via_points, left_target_routes, left_inner_routes = build_cl2_left_bundle_turnaround_plan(
         cfg,
         dimensions,
@@ -3319,10 +3441,6 @@ def validate_multiturn_cl2_clearance(
     minimum_primary_trace_distance = osc1_via_trace_clearance(cfg)
     for via_label in layout.via_labels:
         if via_label in ("TERMINAL_OUTPUT_VIA", "TERMINAL_RETURN_VIA"):
-            continue
-        if via_label.endswith("_LEFT_TURNAROUND_VIA"):
-            # Temporary carve-out while CL1 and the primary are re-routed around the
-            # mirrored left-side CL2 turnaround geometry.
             continue
         nearest_primary_trace = min(
             point_to_segment_distance(layout.points[via_label], segment)
