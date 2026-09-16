@@ -23,6 +23,10 @@ FINGERPRINTS = {
     "5:13:right": "f78ece57d4b00839c5824d862734b4aeb98636fef34650c0d7e35cf5effd3d58",
 }
 
+DEFAULT_AUTOMATIC_FOOTPRINT_SHA256 = (
+    "68e036232b1c77f78c52ad55c95774fa7bf3eafaacc80c72d006ce47e47bcc90"
+)
+
 
 def point(value: generator.Point) -> list[float]:
     return [value[0], value[1]]
@@ -90,6 +94,96 @@ class NamingAndGeometryTests(unittest.TestCase):
                     _, _, cl1, cl2 = self.geometry(turns, target_y, fanout_side)
                     key = f"{turns}:{target_y:g}:{fanout_side}"
                     self.assertEqual(geometry_fingerprint(cl1, cl2), FINGERPRINTS[key])
+
+    def test_automatic_primary_corridor_inset_preserves_the_established_position(self):
+        cfg = generator.build_config({"allow_invalid_geometry": False})
+        dimensions = generator.calculate_dimensions(cfg)
+        primary = generator.build_primary_geometry(cfg)
+        osc1 = primary.coils[0].points
+        osc2 = primary.coils[1].points
+
+        historical_auto_y = (
+            -(
+                (dimensions.primary_width_mm / 2.0)
+                - ((cfg["number_of_primary_turns"] - 1) * generator.trace_pitch(cfg))
+            )
+            + generator.osc1_via_trace_clearance(cfg)
+            + cfg["trace_spacing_mm"]
+        )
+        self.assertEqual(cfg["osc1_vin_exit_offset_mm"], 0.0)
+        self.assertAlmostEqual(
+            generator.effective_osc1_vin_exit_y(cfg, dimensions),
+            generator.automatic_osc1_vin_exit_y(cfg, dimensions),
+        )
+        self.assertAlmostEqual(osc1["SHARED_VIN_VIA"][1], historical_auto_y)
+        self.assertAlmostEqual(osc1["VIN_FANOUT_JOG"][1], historical_auto_y)
+        self.assertAlmostEqual(osc2["SHARED_VIN_VIA"][1], historical_auto_y)
+        self.assertEqual(
+            hashlib.sha256(generator.render_footprint(cfg).encode()).hexdigest(),
+            DEFAULT_AUTOMATIC_FOOTPRINT_SHA256,
+        )
+
+    def test_manual_primary_corridor_inset_moves_dependent_primary_routes(self):
+        for fanout_side in ("left", "right"):
+            with self.subTest(fanout_side=fanout_side):
+                automatic_cfg = generator.build_config(
+                    {"fanout_side": fanout_side, "allow_invalid_geometry": False}
+                )
+                dimensions = generator.calculate_dimensions(automatic_cfg)
+                manual_inset = (
+                    generator.minimum_osc1_vin_exit_inset(automatic_cfg, dimensions) + 0.5
+                )
+                manual_cfg = generator.build_config(
+                    {
+                        "fanout_side": fanout_side,
+                        "osc1_vin_exit_offset_mm": manual_inset,
+                        "allow_invalid_geometry": False,
+                    }
+                )
+                automatic = generator.build_primary_geometry(automatic_cfg)
+                manual = generator.build_primary_geometry(manual_cfg)
+                automatic_osc1 = automatic.coils[0].points
+                manual_osc1 = manual.coils[0].points
+                automatic_osc2 = automatic.coils[1].points
+                manual_osc2 = manual.coils[1].points
+                expected_y = generator.primary_top_copper_edge_y(dimensions=dimensions, cfg=manual_cfg) + manual_inset
+                vertical_shift = expected_y - automatic_osc1["SHARED_VIN_VIA"][1]
+
+                self.assertAlmostEqual(manual_osc1["SHARED_VIN_VIA"][1], expected_y)
+                self.assertAlmostEqual(manual_osc1["VIN_FANOUT_JOG"][1], expected_y)
+                self.assertAlmostEqual(
+                    manual_osc1["ENTRY_WINDING_JOG"][1]
+                    - automatic_osc1["ENTRY_WINDING_JOG"][1],
+                    vertical_shift,
+                )
+                self.assertAlmostEqual(
+                    manual_osc2["ENTRY_WINDING_JOG"][1]
+                    - automatic_osc2["ENTRY_WINDING_JOG"][1],
+                    vertical_shift,
+                )
+                self.assertEqual(
+                    manual_osc1["TERMINAL_OUTPUT_VIA"],
+                    automatic_osc1["TERMINAL_OUTPUT_VIA"],
+                )
+
+    def test_too_small_manual_primary_corridor_inset_is_forceable_geometry_error(self):
+        relaxed_cfg = generator.build_config({"osc1_vin_exit_offset_mm": 1.0})
+        dimensions = generator.calculate_dimensions(relaxed_cfg)
+        minimum = generator.minimum_osc1_vin_exit_inset(relaxed_cfg, dimensions)
+        self.assertGreater(minimum, relaxed_cfg["osc1_vin_exit_offset_mm"])
+        self.assertIsNotNone(generator.build_primary_geometry(relaxed_cfg))
+
+        strict_cfg = generator.build_config(
+            {
+                "osc1_vin_exit_offset_mm": relaxed_cfg["osc1_vin_exit_offset_mm"],
+                "allow_invalid_geometry": False,
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"osc1_vin_exit_offset_mm=.*minimum primary corridor top-edge inset.*set .* to 0",
+        ):
+            generator.build_primary_geometry(strict_cfg)
 
     def test_live_point_keys_and_via_labels_are_descriptive_for_all_turn_counts(self):
         legacy_token = re.compile(r"^(?:[A-Z]|Z[A-Z]?)$")

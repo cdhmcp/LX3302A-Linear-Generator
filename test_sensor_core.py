@@ -14,7 +14,7 @@ from ips_sensor.engine import AnalysisResult, GenerationBlocked, LinearSensorDef
 from ips_sensor.exporters import KiCad9Exporter
 from ips_sensor.layout import CopperLine, FootprintLayout, ThroughHolePad
 from ips_sensor.models import GenerationRequest, OutputConfig, default_request
-from ips_sensor.parameters import PARAMETERS, validate_static_config
+from ips_sensor.parameters import PARAMETERS, PARAMETERS_BY_KEY, validate_static_config
 from ips_sensor.project import load_project, save_project
 
 
@@ -78,6 +78,31 @@ class CoreValidationTests(unittest.TestCase):
         )
         self.assertEqual(KiCad9Exporter().render(layout), legacy.render_footprint(legacy_cfg))
 
+    def test_primary_corridor_metadata_is_advanced_and_allows_automatic_zero(self):
+        spec = PARAMETERS_BY_KEY["osc1_vin_exit_offset_mm"]
+        self.assertEqual(spec.label, "Primary corridor top inset")
+        self.assertFalse(spec.basic)
+        self.assertEqual(spec.minimum, 0)
+        self.assertFalse(spec.exclusive_minimum)
+        self.assertIn("automatic", spec.help_text.lower())
+        self.assertEqual(default_request().config.osc1_vin_exit_offset_mm, 0.0)
+
+    def test_too_small_manual_corridor_inset_is_an_overrideable_setting_diagnostic(self):
+        request = default_request()
+        request = replace(
+            request,
+            config=replace(request.config, osc1_vin_exit_offset_mm=1.0),
+        )
+        analysis = LinearSensorDefinition().analyze(request)
+        self.assertIsNotNone(analysis.layout)
+        diagnostic = next(
+            item
+            for item in analysis.report.diagnostics
+            if item.field == "osc1_vin_exit_offset_mm"
+        )
+        self.assertIs(diagnostic.severity, DiagnosticSeverity.ERROR)
+        self.assertIn("minimum primary corridor top-edge inset", diagnostic.message)
+
 
 class ProjectFileTests(unittest.TestCase):
     def test_project_round_trip_preserves_request(self):
@@ -97,6 +122,33 @@ class ProjectFileTests(unittest.TestCase):
             path.write_text(json.dumps({"config": {"output_dir": "legacy.pretty"}}), encoding="utf-8")
             request = load_project(path)
             self.assertEqual(request.output.output_dir, "legacy.pretty")
+            self.assertEqual(request.config.osc1_vin_exit_offset_mm, 0.0)
+
+    def test_v1_project_resets_inert_corridor_offset_to_automatic(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "v1.ips-sensor.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "config": {"osc1_vin_exit_offset_mm": 1.2},
+                        "output": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            request = load_project(path)
+            self.assertEqual(request.config.osc1_vin_exit_offset_mm, 0.0)
+
+    def test_v2_project_preserves_explicit_manual_corridor_inset(self):
+        request = replace(
+            default_request(),
+            config=replace(default_request().config, osc1_vin_exit_offset_mm=2.0),
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "v2.ips-sensor.json"
+            save_project(path, request)
+            self.assertEqual(load_project(path).config.osc1_vin_exit_offset_mm, 2.0)
 
 
 try:
@@ -154,6 +206,29 @@ class GuiFormTests(unittest.TestCase):
             self.assertAlmostEqual(request.config.trace_width_mm, 12.7)
             self.assertIsInstance(request.config.number_of_primary_turns, int)
             self.assertIsInstance(request.config.number_of_secondary_turns, int)
+        finally:
+            window.close()
+
+    def test_primary_corridor_control_is_advanced_and_converts_mils(self):
+        window = SensorMainWindow(start_validation=False)
+        try:
+            window.show()
+            self.app.processEvents()
+            key = "osc1_vin_exit_offset_mm"
+            control = window._controls[key]
+            unit_selector = window._unit_controls[key]
+            self.assertFalse(control.isVisible())
+            window._advanced_toggle.setChecked(True)
+            self.app.processEvents()
+            self.assertTrue(control.isVisible())
+            self.assertIsInstance(control, UnitNumberEdit)
+            self.assertEqual(control.value_mm(), 0.0)
+            unit_selector.setCurrentText("mil")
+            control.setText("100")
+            self.assertAlmostEqual(
+                window._request_from_controls().config.osc1_vin_exit_offset_mm,
+                2.54,
+            )
         finally:
             window.close()
 

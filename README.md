@@ -49,3 +49,7 @@ It creates an onedir bundle under `dist\IPS-Sensor-GUI`. Code signing and instal
 - `ips_sensor.gui`: standalone PySide6 interface.
 
 The legacy generator is deliberately retained during this migration: the new core converts typed configuration to its established routing routines and converts their output into platform-neutral primitives. This keeps current coil-routing behavior stable while allowing new sensor shapes and exporters to be added through the registry.
+
+## Advanced primary-corridor placement
+
+**Primary corridor top inset** controls the vertical placement of the shared VIN/OSC corridor. `0 mm` means **Automatic** and preserves the verified clearance-safe routing. A positive value is measured downward from the physical outer copper edge of the primary coil's top rail. It is an advanced setting because an overly small manual inset can violate copper clearance; strict generation reports that condition, while **Generate anyway** remains available for renderable layouts after explicit confirmation. Existing schema-v1 project files are migrated to `0 mm`, because their previously stored value did not affect routing. Legacy script overrides of `osc1_vin_exit_offset_mm` now use this active top-inset meaning.

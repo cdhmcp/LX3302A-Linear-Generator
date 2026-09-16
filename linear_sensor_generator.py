@@ -53,7 +53,9 @@ PROPERTIES = {
     # Fanout tuning
     "fanout_side": "left",              # valid options: right OR left
     "terminal_escape_length_mm": 10.0,
-    "osc1_vin_exit_offset_mm": 1.2,
+    # 0 selects the automatic, clearance-safe primary corridor position.
+    # A positive value is a manual inset from the outer top copper edge.
+    "osc1_vin_exit_offset_mm": 0.0,
 
     # Naming
     "footprint_name": "LX3302A_LINEAR_SENSOR_COILS",
@@ -565,7 +567,6 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         "via_hole_size_mm",
         "via_diameter_mm",
         "terminal_escape_length_mm",
-        "osc1_vin_exit_offset_mm",
         "secondary_jump_runup_via_multiplier",
         "secondary_jump_detour_via_multiplier",
         "cl1_primary_end_min_clearance_mm",
@@ -573,7 +574,11 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
     for name in positive_values:
         if cfg[name] <= 0:
             raise ValueError(f"{name} must be > 0.")
-    for name in ("primary_end_extension_mm", "secondary_y_reduction_mm"):
+    for name in (
+        "primary_end_extension_mm",
+        "secondary_y_reduction_mm",
+        "osc1_vin_exit_offset_mm",
+    ):
         if cfg[name] < 0:
             raise ValueError(f"{name} must be >= 0.")
 
@@ -652,6 +657,60 @@ def osc1_via_trace_clearance(cfg: dict) -> float:
     )
 
 
+def primary_top_copper_edge_y(cfg: dict, dimensions: SensorDimensions) -> float:
+    """Return the physical outer copper edge of the primary coil's top rail."""
+    return -(dimensions.primary_width_mm / 2.0) - (cfg["trace_width_mm"] / 2.0)
+
+
+def primary_inner_top_centerline_y(cfg: dict, dimensions: SensorDimensions) -> float:
+    """Return the top-rail centerline of the innermost primary turn."""
+    return -(
+        (dimensions.primary_width_mm / 2.0)
+        - ((cfg["number_of_primary_turns"] - 1) * trace_pitch(cfg))
+    )
+
+
+def automatic_osc1_vin_exit_y(cfg: dict, dimensions: SensorDimensions) -> float:
+    """Return the established clearance-safe shared VIN transition Y position."""
+    return (
+        primary_inner_top_centerline_y(cfg, dimensions)
+        + osc1_via_trace_clearance(cfg)
+        + cfg["trace_spacing_mm"]
+    )
+
+
+def minimum_osc1_vin_exit_inset(cfg: dict, dimensions: SensorDimensions) -> float:
+    """Return the least manual top-edge inset that clears the inner top rail."""
+    return (
+        primary_inner_top_centerline_y(cfg, dimensions)
+        + osc1_via_trace_clearance(cfg)
+        - primary_top_copper_edge_y(cfg, dimensions)
+    )
+
+
+def effective_osc1_vin_exit_y(cfg: dict, dimensions: SensorDimensions) -> float:
+    """Resolve automatic or manual primary-corridor vertical placement."""
+    inset = cfg["osc1_vin_exit_offset_mm"]
+    if inset == 0:
+        return automatic_osc1_vin_exit_y(cfg, dimensions)
+    return primary_top_copper_edge_y(cfg, dimensions) + inset
+
+
+def validate_osc1_vin_exit_inset(cfg: dict, dimensions: SensorDimensions) -> None:
+    """Reject a manual corridor position that overlaps the inner primary top rail."""
+    requested = cfg["osc1_vin_exit_offset_mm"]
+    if requested == 0:
+        return
+    minimum = minimum_osc1_vin_exit_inset(cfg, dimensions)
+    if requested + GEOMETRY_TOLERANCE_MM < minimum:
+        raise ValueError(
+            "osc1_vin_exit_offset_mm="
+            f"{requested:.6f} mm is below the minimum primary corridor top-edge inset "
+            f"of {minimum:.6f} mm; set osc1_vin_exit_offset_mm to 0 for the "
+            "automatic safe position."
+        )
+
+
 def osc1_turn_labels(turn_index: int) -> tuple[str, str, str, str, str, str]:
     """Return canonical point-map labels for one OSC1 perimeter turn."""
     turn_number = turn_index + 1
@@ -678,11 +737,11 @@ def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, P
     turn_count = cfg["number_of_primary_turns"]
     inner_near_x = side * (half_length - ((turn_count - 1) * pitch))
     via_transition = osc1_via_trace_clearance(cfg)
-    inner_top_y = -(half_width - ((turn_count - 1) * pitch))
-    # The shared VIN via sits beside the innermost vertical rail and below its
-    # top horizontal rail.  Work backward from its 45 degree approach so the
-    # inward transitions form nearly complete, pitch-preserving turns.
-    via_y = inner_top_y + via_transition + cfg["trace_spacing_mm"]
+    inner_top_y = primary_inner_top_centerline_y(cfg, dimensions)
+    # The shared VIN via sits beside the innermost vertical rail. Work backward
+    # from its resolved automatic/manual position so its 45 degree approach
+    # forms nearly complete, pitch-preserving turns.
+    via_y = effective_osc1_vin_exit_y(cfg, dimensions)
     last_end_y = via_y - via_transition
     start_y = (
         last_end_y
@@ -716,11 +775,9 @@ def build_osc1_point_map(cfg: dict, dimensions: SensorDimensions) -> dict[str, P
         start_y = points[end][1] + pitch
 
     last_end = osc1_turn_labels(turn_count - 1)[5]
-    # Place the shared VIN via outside the inner vertical rail and just below
-    # its top horizontal rail.  The horizontal separation is one normal
-    # via-to-trace clearance; the vertical separation contains two copper
-    # spacings (the normal clearance plus one additional trace spacing).
-    via_y = inner_top_y + via_transition + cfg["trace_spacing_mm"]
+    # Place the shared VIN via outside the inner vertical rail.  Its vertical
+    # position is either the automatic clearance-safe location or the manual
+    # top-edge inset selected for the primary corridor.
     points[last_end] = (inner_near_x, last_end_y)
     via_x = inner_near_x - (side * via_transition)
     points["SHARED_VIN_VIA"] = (via_x, via_y)
@@ -870,20 +927,17 @@ def validate_osc1_clearance(
             raise ValueError(f"OSC1 vias {start} and {end} violate plated via clearance.")
 
     minimum_trace_distance = osc1_via_trace_clearance(cfg)
-    connected_body = {
+    connected_copper = {
         "TERMINAL_OUTPUT_VIA": body_segments[:1],
-        "SHARED_VIN_VIA": body_segments[-1:],
-        "TERMINAL_VIN_VIA": (),
+        "SHARED_VIN_VIA": body_segments[-1:] + escape_segments[:1],
+        "TERMINAL_VIN_VIA": escape_segments[-1:],
     }
-    for pad_name in connected_body:
-        for segment in body_segments:
-            if segment in connected_body[pad_name]:
+    for pad_name, directly_connected in connected_copper.items():
+        for segment in body_segments + escape_segments:
+            if segment in directly_connected:
                 continue
             if point_to_segment_distance(points[pad_name], segment) < minimum_trace_distance:
-                raise ValueError(f"OSC1 {pad_name} via violates clearance to winding copper.")
-    for segment in escape_segments:
-        if point_to_segment_distance(points["TERMINAL_OUTPUT_VIA"], segment) < minimum_trace_distance:
-            raise ValueError("OSC1 output terminal via violates clearance to the VIN escape.")
+                raise ValueError(f"OSC1 {pad_name} via violates clearance to non-connected copper.")
 
 
 def validate_osc2_clearance(
@@ -928,6 +982,7 @@ def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
     osc1_points = build_osc1_point_map(cfg, dimensions)
     osc1_body_segments, osc1_escape_segments = build_osc1_segments(cfg, osc1_points)
     if not should_skip_geometry_validation(cfg):
+        validate_osc1_vin_exit_inset(cfg, dimensions)
         validate_osc1_clearance(cfg, osc1_points, osc1_body_segments, osc1_escape_segments)
     osc1_layer, osc2_layer = primary_layers(cfg)
     coils: list[PrimaryCoil] = [
@@ -3169,7 +3224,7 @@ def build_multiturn_cl2_layout(
     primary_segments = tuple(
         segment
         for coil in primary_geometry.coils
-        for segment in coil.body_segments
+        for segment in coil.body_segments + coil.escape_segments
     )
     turnaround_plan = build_cl2_right_turnaround_plan(
         cfg,
@@ -3414,7 +3469,7 @@ def validate_multiturn_cl2_clearance(
     primary_segments = tuple(
         segment
         for coil in primary_geometry.coils
-        for segment in coil.body_segments
+        for segment in coil.body_segments + coil.escape_segments
     )
     minimum_pad_distance = secondary_via_spacing(cfg)
     for first_index, first in enumerate(layout.via_labels):
@@ -4307,7 +4362,7 @@ def validate_multiturn_cl1_clearance(
         nearest_primary_trace = min(
             point_to_segment_distance(layout.points[via_label], segment)
             for coil in primary_geometry.coils
-            for segment in coil.body_segments
+            for segment in coil.body_segments + coil.escape_segments
         )
         if nearest_primary_trace + GEOMETRY_TOLERANCE_MM < minimum_trace_distance:
             raise ValueError(f"CL1 via {via_label} violates clearance to the primary winding.")

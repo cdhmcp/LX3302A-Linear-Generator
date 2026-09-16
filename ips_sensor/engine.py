@@ -236,6 +236,7 @@ def _geometry_diagnostic(error: Exception) -> Diagnostic:
 def _field_from_legacy_message(message: str) -> str | None:
     lowered = message.lower()
     hints = (
+        ("osc1_vin_exit_offset", "osc1_vin_exit_offset_mm"),
         ("primary_end_extension", "primary_end_extension_mm"),
         ("secondary_y_reduction", "secondary_y_reduction_mm"),
         ("via_diameter", "via_diameter_mm"),

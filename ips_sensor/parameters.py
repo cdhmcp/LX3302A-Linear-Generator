@@ -116,8 +116,11 @@ PARAMETERS: tuple[ParameterSpec, ...] = (
           "Side of the sensor where external terminals and escape routing are placed.", choices=("left", "right")),
     _spec("terminal_escape_length_mm", "Terminal escape length", "Fanout", ParameterKind.FLOAT,
           "Distance from the primary envelope to the shared terminal column.", unit="mm", minimum=0, exclusive_minimum=True),
-    _spec("osc1_vin_exit_offset_mm", "OSC1 VIN exit offset", "Fanout", ParameterKind.FLOAT,
-          "Offset used by the OSC1 VIN escape routing.", unit="mm", minimum=0, exclusive_minimum=True),
+    _spec("osc1_vin_exit_offset_mm", "Primary corridor top inset", "Fanout", ParameterKind.FLOAT,
+          "Vertical placement of the shared VIN/OSC corridor. 0 selects the automatic, clearance-safe position. "
+          "A positive value measures downward from the physical outer copper edge of the primary coil's top rail; "
+          "larger values move the corridor lower. Manual positions are checked for clearance to primary copper and "
+          "related transition vias.", unit="mm", minimum=0, basic=False),
 
     _spec("footprint_name", "Footprint name", "Naming", ParameterKind.TEXT,
           "Name written into the exported footprint filename and KiCad footprint header."),

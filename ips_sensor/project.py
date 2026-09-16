@@ -9,7 +9,7 @@ from typing import Any
 
 from .models import GenerationRequest, LinearSensorConfig, OutputConfig
 
-PROJECT_SCHEMA_VERSION = 1
+PROJECT_SCHEMA_VERSION = 2
 
 
 class ProjectLoadError(ValueError):
@@ -31,7 +31,7 @@ def save_project(path: str | Path, request: GenerationRequest) -> Path:
 
 
 def load_project(path: str | Path) -> GenerationRequest:
-    """Load schema v1 documents and normalize older missing-version files."""
+    """Load current project documents and migrate supported legacy versions."""
     project_path = Path(path)
     try:
         raw: Any = json.loads(project_path.read_text(encoding="utf-8"))
@@ -65,11 +65,26 @@ def load_project(path: str | Path) -> GenerationRequest:
 
 def _migrate(raw: dict[str, Any], schema_version: int) -> dict[str, Any]:
     """Migrate known legacy shapes; add future migrations here in sequence."""
-    if schema_version == 0:
-        # Early hand-authored files may have placed output_dir in config.
-        config = dict(raw.get("config", {}))
-        output = dict(raw.get("output", {}))
-        if "output_dir" in config and "output_dir" not in output:
-            output["output_dir"] = config.pop("output_dir")
-        return {**raw, "schema_version": 1, "config": config, "output": output}
-    return raw
+    migrated = dict(raw)
+    version = schema_version
+    while version < PROJECT_SCHEMA_VERSION:
+        if version == 0:
+            # Early hand-authored files may have placed output_dir in config.
+            config = dict(migrated.get("config", {}))
+            output = dict(migrated.get("output", {}))
+            if "output_dir" in config and "output_dir" not in output:
+                output["output_dir"] = config.pop("output_dir")
+            migrated = {
+                **migrated,
+                "schema_version": 1,
+                "config": config,
+                "output": output,
+            }
+        elif version == 1:
+            # In schema v1 this persisted setting had no routing effect. Reset
+            # it to Automatic so opening a legacy project preserves its layout.
+            config = dict(migrated.get("config", {}))
+            config["osc1_vin_exit_offset_mm"] = 0.0
+            migrated = {**migrated, "schema_version": 2, "config": config}
+        version += 1
+    return migrated

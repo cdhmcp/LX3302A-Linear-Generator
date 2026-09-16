@@ -33,7 +33,8 @@ class LinearSensorConfig:
 
     fanout_side: str = "left"
     terminal_escape_length_mm: float = 10.0
-    osc1_vin_exit_offset_mm: float = 1.2
+    # 0 preserves the automatically calculated, clearance-safe corridor position.
+    osc1_vin_exit_offset_mm: float = 0.0
 
     footprint_name: str = "LX3302A_LINEAR_SENSOR_COILS"
     reference_text: str = "REF**"
