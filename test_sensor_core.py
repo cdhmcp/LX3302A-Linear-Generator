@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from ips_sensor.diagnostics import Diagnostic, DiagnosticSeverity, ValidationReport
 from ips_sensor.engine import AnalysisResult, GenerationBlocked, LinearSensorDefinition
@@ -140,21 +141,42 @@ class ProjectFileTests(unittest.TestCase):
             request = load_project(path)
             self.assertEqual(request.config.osc1_vin_exit_offset_mm, 0.0)
 
-    def test_v2_project_preserves_explicit_manual_corridor_inset(self):
+    def test_current_project_preserves_explicit_manual_corridor_inset(self):
         request = replace(
             default_request(),
             config=replace(default_request().config, osc1_vin_exit_offset_mm=2.0),
         )
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "v2.ips-sensor.json"
+            path = Path(temp_dir) / "v3.ips-sensor.json"
             save_project(path, request)
             self.assertEqual(load_project(path).config.osc1_vin_exit_offset_mm, 2.0)
+
+    def test_v2_project_discards_retired_receiver_routing_controls(self):
+        retired = {
+            "secondary_jump_runup_via_multiplier": 3.0,
+            "secondary_jump_detour_via_multiplier": 0.35,
+            "cl1_transition_column_fraction": 0.03,
+            "cl1_primary_end_min_clearance_mm": 1.0,
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "v2.ips-sensor.json"
+            path.write_text(
+                json.dumps({"schema_version": 2, "config": retired, "output": {}}),
+                encoding="utf-8",
+            )
+            request = load_project(path)
+            self.assertFalse(set(retired) & set(asdict(request.config)))
 
 
 try:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication, QAbstractSpinBox, QGraphicsSimpleTextItem
-    from ips_sensor.gui.main_window import NoWheelComboBox, UnitNumberEdit, SensorMainWindow
+    from ips_sensor.gui.main_window import (
+        NoWheelComboBox,
+        SensorMainWindow,
+        UnitNumberEdit,
+        ValidationState,
+    )
     from ips_sensor.gui.preview import FootprintPreview
 except ImportError:  # pragma: no cover - developer machines can run core-only tests
     QApplication = None
@@ -167,8 +189,35 @@ class GuiFormTests(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    @staticmethod
+    def _analysis_result(
+        severity: DiagnosticSeverity = DiagnosticSeverity.WARNING,
+    ) -> AnalysisResult:
+        layout = FootprintLayout(
+            name="PREVIEW",
+            reference="REF**",
+            items=(
+                CopperLine("F.Cu", (0.0, 0.0), (5.0, 1.0), 0.2),
+                ThroughHolePad("VIN", (0.0, 0.0), 0.5, 0.25),
+            ),
+            primary_length_mm=5.0,
+            primary_width_mm=1.0,
+            secondary_length_mm=5.0,
+            secondary_width_mm=1.0,
+        )
+        return AnalysisResult(
+            ValidationReport((
+                Diagnostic("CHECK", severity, "Review this setting.", "trace_width_mm"),
+            )),
+            layout,
+        )
+
+    @staticmethod
+    def _set_current(window: SensorMainWindow, analysis: AnalysisResult) -> None:
+        window._validation_finished(window._revision, analysis, None)
+
     def test_form_has_all_metadata_backed_controls_and_advanced_toggle(self):
-        window = SensorMainWindow(start_validation=False)
+        window = SensorMainWindow()
         try:
             window.show()
             self.app.processEvents()
@@ -182,8 +231,119 @@ class GuiFormTests(unittest.TestCase):
         finally:
             window.close()
 
+    def test_results_start_not_validated_without_starting_background_analysis(self):
+        window = SensorMainWindow()
+        try:
+            self.assertIs(window._validation_state, ValidationState.NOT_VALIDATED)
+            self.assertFalse(window._worker_active)
+            self.assertTrue(window._validate_button.isEnabled())
+            self.assertFalse(window._generate_button.isEnabled())
+            self.assertIn("Not validated", window._result_status.text())
+            self.assertIn("Not validated", window.preview.overlay_message or "")
+            self.assertIn("Not validated", window.diagnostics.overlay_message or "")
+        finally:
+            window.close()
+
+    def test_semantic_edits_stale_results_but_unit_switching_does_not(self):
+        window = SensorMainWindow()
+        try:
+            analysis = self._analysis_result()
+            self._set_current(window, analysis)
+            revision = window._revision
+            unit_selector = window._unit_controls["trace_width_mm"]
+            unit_selector.setCurrentText("mil")
+            self.assertIs(window._validation_state, ValidationState.CURRENT)
+            self.assertEqual(window._revision, revision)
+
+            trace_width = window._controls["trace_width_mm"]
+            trace_width.setText("10")
+            trace_width.textEdited.emit("10")
+            self.assertIs(window._validation_state, ValidationState.STALE)
+            self.assertEqual(window._revision, revision + 1)
+            self.assertIs(window.preview.layout, analysis.layout)
+            self.assertIn("out of date", (window.preview.overlay_message or "").lower())
+            self.assertIn("Out of date", window._preview_heading.text())
+            self.assertIn("Out of date", window._diagnostics_heading.text())
+            self.assertFalse(window.diagnostics.isEnabled())
+            self.assertFalse(window._layer_button.isEnabled())
+            self.assertFalse(window._generate_button.isEnabled())
+        finally:
+            window.close()
+
+    def test_validation_is_explicit_and_discards_a_result_for_edited_settings(self):
+        class CapturePool:
+            def __init__(self) -> None:
+                self.workers = []
+
+            def start(self, worker) -> None:
+                self.workers.append(worker)
+
+        window = SensorMainWindow()
+        try:
+            pool = CapturePool()
+            window._thread_pool = pool
+            window._validate_now()
+            self.assertIs(window._validation_state, ValidationState.VALIDATING)
+            self.assertEqual(len(pool.workers), 1)
+            self.assertFalse(window._validate_button.isEnabled())
+            window._validate_now()
+            self.assertEqual(len(pool.workers), 1)
+
+            validation_revision = window._revision
+            window._on_field_edited()
+            self.assertIs(window._validation_state, ValidationState.STALE)
+            window._validation_finished(validation_revision, self._analysis_result(), None)
+            self.assertIs(window._validation_state, ValidationState.STALE)
+            self.assertIsNone(window._latest_analysis)
+            self.assertTrue(window._validate_button.isEnabled())
+            self.assertFalse(window._generate_button.isEnabled())
+        finally:
+            window.close()
+
+    def test_load_and_reset_mark_existing_results_stale_without_starting_validation(self):
+        window = SensorMainWindow()
+        try:
+            analysis = self._analysis_result()
+            self._set_current(window, analysis)
+            window._reset_defaults()
+            self.assertIs(window._validation_state, ValidationState.STALE)
+            self.assertFalse(window._worker_active)
+            self.assertIs(window.preview.layout, analysis.layout)
+            self.assertFalse(window._generate_button.isEnabled())
+
+            self._set_current(window, analysis)
+            with tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "loaded.ips-sensor.json"
+                save_project(path, default_request())
+                with patch(
+                    "ips_sensor.gui.main_window.QFileDialog.getOpenFileName",
+                    return_value=(str(path), "Sensor projects (*.ips-sensor.json)"),
+                ):
+                    window._load_project()
+            self.assertIs(window._validation_state, ValidationState.STALE)
+            self.assertFalse(window._worker_active)
+            self.assertIs(window.preview.layout, analysis.layout)
+            self.assertFalse(window._generate_button.isEnabled())
+        finally:
+            window.close()
+
+    def test_current_errors_remain_generateable_but_blocking_results_do_not(self):
+        window = SensorMainWindow()
+        try:
+            self._set_current(window, self._analysis_result(DiagnosticSeverity.ERROR))
+            self.assertIs(window._validation_state, ValidationState.CURRENT)
+            self.assertTrue(window._generate_button.isEnabled())
+
+            window._on_field_edited()
+            self._set_current(window, self._analysis_result(DiagnosticSeverity.BLOCKING))
+            self.assertTrue(window.diagnostics.isEnabled())
+            self.assertFalse(window._generate_button.isEnabled())
+            self.assertIn("blocking", window._generate_button.toolTip().lower())
+        finally:
+            window.close()
+
     def test_turn_selectors_and_mm_mil_inputs_are_keyboard_only(self):
-        window = SensorMainWindow(start_validation=False)
+        window = SensorMainWindow()
         try:
             for key in ("number_of_primary_turns", "number_of_secondary_turns"):
                 selector = window._controls[key]
@@ -210,7 +370,7 @@ class GuiFormTests(unittest.TestCase):
             window.close()
 
     def test_primary_corridor_control_is_advanced_and_converts_mils(self):
-        window = SensorMainWindow(start_validation=False)
+        window = SensorMainWindow()
         try:
             window.show()
             self.app.processEvents()
@@ -233,7 +393,7 @@ class GuiFormTests(unittest.TestCase):
             window.close()
 
     def test_preview_and_diagnostics_consume_neutral_layout(self):
-        window = SensorMainWindow(start_validation=False)
+        window = SensorMainWindow()
         try:
             layout = FootprintLayout(
                 name="PREVIEW",
@@ -250,7 +410,11 @@ class GuiFormTests(unittest.TestCase):
             report = ValidationReport((
                 Diagnostic("CHECK", DiagnosticSeverity.WARNING, "Review this setting.", "trace_width_mm"),
             ))
-            window._show_analysis(AnalysisResult(report, layout))
+            analysis = AnalysisResult(report, layout)
+            window._latest_analysis = analysis
+            window._show_analysis(analysis)
+            window._validation_state = ValidationState.CURRENT
+            window._update_result_presentation()
             self.assertIs(window.preview.layout, layout)
             self.assertEqual(window.diagnostics.topLevelItemCount(), 1)
             self.assertTrue(window._layer_button.isEnabled())

@@ -246,7 +246,6 @@ def _field_from_legacy_message(message: str) -> str | None:
         ("secondary stroke", "stroke_range_mm"),
         ("secondary width", "target_y_mm"),
         ("primary width", "primary_y_margin_mm"),
-        ("transition columns", "cl1_transition_column_fraction"),
         ("osc2", "generate_osc2"),
         ("fanout", "fanout_side"),
     )

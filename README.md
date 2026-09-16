@@ -11,7 +11,9 @@ python -m pip install -e .[gui]
 ips-sensor-gui
 ```
 
-The application presents common settings first and exposes all routing and naming controls through **Show advanced**. Every field has a help button. Geometry checks run in the background; invalid but renderable geometry requires an explicit **Generate anyway** confirmation before KiCad output is written.
+The application presents common settings first and exposes all routing and naming controls through **Show advanced**. Every field has a help button. Select **Validate & Update Preview** to run background geometry checks and refresh the preview/diagnostics; changing a setting marks those results as out of date until you validate again. Invalid but renderable geometry requires an explicit **Generate anyway** confirmation before KiCad output is written.
+
+Set **Primary end extension** to `0` to have the generator select the smallest symmetric extension required by the active CL1 and CL2 routing. A positive value is accepted only when it is at least that computed clearance-safe value.
 
 ## Generate from a saved project
 

@@ -52,10 +52,6 @@ class LinearSensorConfig:
     generate_cl1: bool = True
 
     secondary_curve_samples_per_cycle: int = 256
-    secondary_jump_runup_via_multiplier: float = 3.0
-    secondary_jump_detour_via_multiplier: float = 0.35
-    cl1_transition_column_fraction: float = 0.03
-    cl1_primary_end_min_clearance_mm: float = 1.0
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> "LinearSensorConfig":

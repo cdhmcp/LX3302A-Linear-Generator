@@ -268,23 +268,7 @@ class NamingAndGeometryTests(unittest.TestCase):
         ):
             generator.calculate_dimensions(too_short_cfg)
 
-    def test_primary_end_extension_uses_cl1_floor_without_cl2(self):
-        one_turn_cfg = generator.build_config(
-            {
-                "number_of_secondary_turns": 1,
-                "primary_end_extension_mm": 0.0,
-            }
-        )
-        one_turn_dimensions = generator.calculate_dimensions(one_turn_cfg)
-        one_turn_extension = (
-            one_turn_dimensions.primary_length_mm
-            - one_turn_dimensions.secondary_length_mm
-        ) / 2.0
-        self.assertGreater(
-            one_turn_extension,
-            one_turn_cfg["cl1_primary_end_min_clearance_mm"],
-        )
-
+    def test_primary_end_extension_automatically_clears_cl1_without_cl2(self):
         cfg = generator.build_config(
             {
                 "generate_cl2": False,
@@ -293,7 +277,23 @@ class NamingAndGeometryTests(unittest.TestCase):
         )
         dimensions = generator.calculate_dimensions(cfg)
         extension = (dimensions.primary_length_mm - dimensions.secondary_length_mm) / 2.0
-        self.assertEqual(extension, cfg["cl1_primary_end_min_clearance_mm"])
+        self.assertGreater(extension, 0.0)
+
+        primary = generator.build_primary_geometry(cfg)
+        cl1 = generator.build_cl1_geometry(cfg, primary, None)
+        self.assertIsNotNone(cl1)
+
+        too_short_cfg = generator.build_config(
+            {
+                "generate_cl2": False,
+                "primary_end_extension_mm": extension - 0.05,
+            }
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            r"set primary_end_extension_mm to 0 for the minimum viable setting",
+        ):
+            generator.calculate_dimensions(too_short_cfg)
 
     def test_generated_receiver_intermediate_pads_have_exactly_one_coil_prefix(self):
         cfg, _, cl1, cl2 = self.geometry(5, 13.0)

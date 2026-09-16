@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from enum import Enum
 import math
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal, Slot
-from PySide6.QtGui import QDoubleValidator, QIntValidator
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, Signal, Slot
+from PySide6.QtGui import QColor, QDoubleValidator, QIntValidator, QPainter
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -106,6 +107,50 @@ class IntegerEntry(QLineEdit):
         self.setAlignment(Qt.AlignmentFlag.AlignRight)
 
 
+class ValidationState(str, Enum):
+    """Whether the visible preview and diagnostics match the form values."""
+
+    NOT_VALIDATED = "not_validated"
+    STALE = "stale"
+    VALIDATING = "validating"
+    CURRENT = "current"
+
+
+class OverlayTreeWidget(QTreeWidget):
+    """Diagnostics table that can visibly block stale result interaction."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._overlay_message: str | None = None
+
+    @property
+    def overlay_message(self) -> str | None:
+        return self._overlay_message
+
+    def set_overlay_message(self, message: str | None) -> None:
+        if message == self._overlay_message:
+            return
+        self._overlay_message = message
+        self.viewport().update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt callback name
+        super().paintEvent(event)
+        if not self._overlay_message:
+            return
+        painter = QPainter(self.viewport())
+        painter.fillRect(self.viewport().rect(), QColor(15, 23, 42, 185))
+        painter.setPen(QColor("#f8fafc"))
+        font = painter.font()
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(
+            self.viewport().rect(),
+            Qt.AlignmentFlag.AlignCenter,
+            self._overlay_message,
+        )
+        painter.end()
+
+
 class _WorkerSignals(QObject):
     completed = Signal(int, object, object)
 
@@ -139,7 +184,7 @@ class _AnalysisWorker(QRunnable):
 class SensorMainWindow(QMainWindow):
     """Interactive editor with help, diagnostics, preview, and safe export."""
 
-    def __init__(self, *, start_validation: bool = True) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Inductive Sensor Footprint Generator")
         self.resize(1480, 920)
@@ -153,22 +198,15 @@ class SensorMainWindow(QMainWindow):
         self._advanced_rows: list[tuple[QWidget, QWidget, QGroupBox]] = []
         self._groups: dict[str, QGroupBox] = {}
         self._latest_analysis: AnalysisResult | None = None
-        self._analysis_revision = -1
         self._revision = 0
         self._worker_active = False
-        self._pending_validation = False
-        self._generate_after_validation = False
+        self._validation_state = ValidationState.NOT_VALIDATED
         self._thread_pool = QThreadPool(self)
         self._thread_pool.setMaxThreadCount(1)
 
-        self._validation_timer = QTimer(self)
-        self._validation_timer.setSingleShot(True)
-        self._validation_timer.timeout.connect(self._start_validation)
-
         self._build_ui()
         self._populate_controls()
-        if start_validation:
-            self._schedule_validation(delay_ms=0)
+        self._update_result_presentation()
 
     def _build_ui(self) -> None:
         splitter = QSplitter(Qt.Orientation.Horizontal, self)
@@ -212,13 +250,19 @@ class SensorMainWindow(QMainWindow):
         outer_layout.addWidget(scroll, 1)
 
         button_grid = QHBoxLayout()
-        validate_button = QPushButton("Validate")
-        validate_button.clicked.connect(self._validate_now)
-        button_grid.addWidget(validate_button)
-        generate_button = QPushButton("Generate")
-        generate_button.setDefault(True)
-        generate_button.clicked.connect(self._generate)
-        button_grid.addWidget(generate_button)
+        self._validate_button = QPushButton("Validate && Update Preview")
+        self._validate_button.setDefault(True)
+        self._validate_button.setToolTip(
+            "Run geometry and clearance checks, then update the preview and diagnostics."
+        )
+        self._validate_button.clicked.connect(self._validate_now)
+        button_grid.addWidget(self._validate_button)
+        self._generate_button = QPushButton("Generate Footprint")
+        self._generate_button.setToolTip(
+            "Validate the current settings before generating a footprint."
+        )
+        self._generate_button.clicked.connect(self._generate)
+        button_grid.addWidget(self._generate_button)
         outer_layout.addLayout(button_grid)
 
         project_buttons = QHBoxLayout()
@@ -238,8 +282,14 @@ class SensorMainWindow(QMainWindow):
         panel = QWidget(self)
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(8, 8, 8, 8)
+        self._result_status = QLabel()
+        self._result_status.setWordWrap(True)
+        self._result_status.setContentsMargins(8, 6, 8, 6)
+        layout.addWidget(self._result_status)
+
         preview_header = QHBoxLayout()
-        preview_header.addWidget(QLabel("2D footprint preview"))
+        self._preview_heading = QLabel("2D footprint preview")
+        preview_header.addWidget(self._preview_heading)
         preview_header.addStretch()
         self._layer_button = QToolButton()
         self._layer_button.setText("Layers")
@@ -252,8 +302,9 @@ class SensorMainWindow(QMainWindow):
         self.preview.setFrameShape(QFrame.Shape.StyledPanel)
         layout.addWidget(self.preview, 3)
 
-        layout.addWidget(QLabel("Diagnostics"))
-        self.diagnostics = QTreeWidget(self)
+        self._diagnostics_heading = QLabel("Diagnostics")
+        layout.addWidget(self._diagnostics_heading)
+        self.diagnostics = OverlayTreeWidget(self)
         self.diagnostics.setHeaderLabels(["Severity", "Setting", "Message"])
         self.diagnostics.setRootIsDecorated(False)
         self.diagnostics.setAlternatingRowColors(True)
@@ -292,7 +343,7 @@ class SensorMainWindow(QMainWindow):
         if spec.kind is ParameterKind.FLOAT:
             if spec.unit:
                 control = UnitNumberEdit()
-                control.editingFinished.connect(changed)
+                control.textEdited.connect(changed)
                 unit_selector = NoWheelComboBox()
                 unit_selector.addItems(("mm", "mil"))
                 # Leave enough room for "mil" plus the combo arrow at common
@@ -300,7 +351,6 @@ class SensorMainWindow(QMainWindow):
                 unit_selector.setFixedWidth(76)
                 unit_selector.setToolTip("Select millimeters or mils for this value")
                 unit_selector.currentTextChanged.connect(control.set_display_unit)
-                unit_selector.currentTextChanged.connect(changed)
                 wrapper = QWidget()
                 wrapper_layout = QHBoxLayout(wrapper)
                 wrapper_layout.setContentsMargins(0, 0, 0, 0)
@@ -313,7 +363,7 @@ class SensorMainWindow(QMainWindow):
             validator.setNotation(QDoubleValidator.Notation.StandardNotation)
             control.setValidator(validator)
             control.setAlignment(Qt.AlignmentFlag.AlignRight)
-            control.editingFinished.connect(changed)
+            control.textEdited.connect(changed)
             return control, control
         if spec.kind is ParameterKind.INTEGER:
             if spec.key in {"number_of_primary_turns", "number_of_secondary_turns"}:
@@ -322,7 +372,7 @@ class SensorMainWindow(QMainWindow):
                 control.currentTextChanged.connect(changed)
                 return control, control
             control = IntegerEntry()
-            control.editingFinished.connect(changed)
+            control.textEdited.connect(changed)
             return control, control
         if spec.kind is ParameterKind.BOOLEAN:
             control = QCheckBox()
@@ -334,7 +384,7 @@ class SensorMainWindow(QMainWindow):
             control.currentTextChanged.connect(changed)
             return control, control
         control = QLineEdit()
-        control.editingFinished.connect(changed)
+        control.textEdited.connect(changed)
         if spec.kind is ParameterKind.DIRECTORY:
             browse = QPushButton("Browse…")
             browse.clicked.connect(lambda _checked=False, key=spec.key: self._browse_directory(key))
@@ -406,19 +456,17 @@ class SensorMainWindow(QMainWindow):
 
     def _on_field_edited(self, *_args) -> None:
         self._revision += 1
-        self._schedule_validation()
-
-    def _schedule_validation(self, *, delay_ms: int = 650) -> None:
-        self._validation_timer.start(delay_ms)
+        self._validation_state = ValidationState.STALE
+        self._update_result_presentation()
 
     def _start_validation(self) -> None:
         if self._worker_active:
-            self._pending_validation = True
             return
         request = self._request_from_controls()
         self._worker_active = True
         revision = self._revision
-        self.statusBar().showMessage("Checking geometry and clearance rules…")
+        self._validation_state = ValidationState.VALIDATING
+        self._update_result_presentation()
         worker = _AnalysisWorker(revision, self.definition, request)
         worker.signals.completed.connect(self._validation_finished)
         self._thread_pool.start(worker)
@@ -430,27 +478,25 @@ class SensorMainWindow(QMainWindow):
         error: Exception | None,
     ) -> None:
         self._worker_active = False
-        if revision == self._revision:
-            if error is not None:
-                report = ValidationReport((
-                    Diagnostic(
-                        "UNEXPECTED_FAILURE",
-                        DiagnosticSeverity.BLOCKING,
-                        str(error) or type(error).__name__,
-                    ),
-                ))
-                result = AnalysisResult(report, None)
-            assert result is not None
-            self._latest_analysis = result
-            self._analysis_revision = revision
-            self._show_analysis(result)
-            if self._generate_after_validation:
-                self._generate_after_validation = False
-                self._complete_generation(result)
+        if revision != self._revision:
+            self._validation_state = ValidationState.STALE
+            self._update_result_presentation()
+            return
 
-        if self._pending_validation or revision != self._revision:
-            self._pending_validation = False
-            self._schedule_validation(delay_ms=0)
+        if error is not None:
+            report = ValidationReport((
+                Diagnostic(
+                    "UNEXPECTED_FAILURE",
+                    DiagnosticSeverity.BLOCKING,
+                    str(error) or type(error).__name__,
+                ),
+            ))
+            result = AnalysisResult(report, None)
+        assert result is not None
+        self._latest_analysis = result
+        self._show_analysis(result)
+        self._validation_state = ValidationState.CURRENT
+        self._update_result_presentation()
 
     def _show_analysis(self, analysis: AnalysisResult) -> None:
         self.diagnostics.clear()
@@ -467,10 +513,77 @@ class SensorMainWindow(QMainWindow):
         else:
             self.preview.set_layout(None)
             self._layer_button.setEnabled(False)
-        report = analysis.report
-        self.statusBar().showMessage(
-            f"Validation complete: {len(report.blocking)} blocking, {len(report.errors)} errors, {len(report.warnings)} warnings."
+
+    def _update_result_presentation(self) -> None:
+        """Make result freshness and available actions unambiguous to the user."""
+        state = self._validation_state
+        overlay_message: str | None
+        suffix = ""
+        if state is ValidationState.CURRENT and self._latest_analysis is not None:
+            report = self._latest_analysis.report
+            message = (
+                "Validation current: "
+                f"{len(report.blocking)} blocking, {len(report.errors)} errors, "
+                f"{len(report.warnings)} warnings."
+            )
+            style = "background: #14532d; color: #f0fdf4; border: 1px solid #22c55e; border-radius: 3px;"
+            overlay_message = None
+        elif state is ValidationState.VALIDATING:
+            message = "Validating current settings..."
+            style = "background: #1e3a8a; color: #eff6ff; border: 1px solid #60a5fa; border-radius: 3px;"
+            overlay_message = "Validating current settings..."
+            suffix = " - Updating"
+        elif state is ValidationState.NOT_VALIDATED:
+            message = "Not validated - select Validate & Update Preview."
+            style = "background: #3f3f46; color: #fafafa; border: 1px solid #a1a1aa; border-radius: 3px;"
+            overlay_message = "Not validated\nSelect Validate & Update Preview"
+            suffix = " - Out of date"
+        elif self._worker_active:
+            message = (
+                "Out of date - settings changed while validation is in progress. "
+                "Wait for it to finish, then select Validate & Update Preview."
+            )
+            style = "background: #78350f; color: #fffbeb; border: 1px solid #f59e0b; border-radius: 3px;"
+            overlay_message = "Results are out of date\nValidation is running for older settings"
+            suffix = " - Out of date"
+        else:
+            message = "Out of date - settings changed; select Validate & Update Preview."
+            style = "background: #78350f; color: #fffbeb; border: 1px solid #f59e0b; border-radius: 3px;"
+            overlay_message = "Results are out of date\nSelect Validate & Update Preview"
+            suffix = " - Out of date"
+
+        self._result_status.setText(message)
+        self._result_status.setStyleSheet(style)
+        self._preview_heading.setText(f"2D footprint preview{suffix}")
+        self._diagnostics_heading.setText(f"Diagnostics{suffix}")
+        self.preview.set_overlay_message(overlay_message)
+        self.preview.setEnabled(overlay_message is None and self.preview.layout is not None)
+        self.diagnostics.set_overlay_message(overlay_message)
+        self.diagnostics.setEnabled(overlay_message is None)
+
+        current_layout = self._latest_analysis.layout if self._latest_analysis else None
+        current_report = self._latest_analysis.report if self._latest_analysis else None
+        can_generate = (
+            state is ValidationState.CURRENT
+            and not self._worker_active
+            and current_layout is not None
+            and current_report is not None
+            and not current_report.blocking
         )
+        self._validate_button.setEnabled(not self._worker_active)
+        self._generate_button.setEnabled(can_generate)
+        self._layer_button.setEnabled(
+            overlay_message is None
+            and current_layout is not None
+            and bool(current_layout.layers)
+        )
+        if can_generate:
+            self._generate_button.setToolTip("Generate a footprint from the current validated settings.")
+        elif state is ValidationState.CURRENT and current_report is not None and current_report.blocking:
+            self._generate_button.setToolTip("Fix blocking diagnostics before generating a footprint.")
+        else:
+            self._generate_button.setToolTip("Validate the current settings before generating a footprint.")
+        self.statusBar().showMessage(message)
 
     def _rebuild_layer_menu(self, layout) -> None:
         menu = self._layer_button.menu()
@@ -486,16 +599,21 @@ class SensorMainWindow(QMainWindow):
         self._layer_button.setEnabled(bool(layout.layers))
 
     def _validate_now(self) -> None:
-        self._revision += 1
-        self._schedule_validation(delay_ms=0)
+        self._start_validation()
 
     def _generate(self) -> None:
-        if self._worker_active or self._analysis_revision != self._revision:
-            self._generate_after_validation = True
-            self._schedule_validation(delay_ms=0)
-            self.statusBar().showMessage("Validating before generation…")
+        if (
+            self._worker_active
+            or self._validation_state is not ValidationState.CURRENT
+            or self._latest_analysis is None
+        ):
+            self.statusBar().showMessage(
+                "Preview and diagnostics are out of date. Select Validate & Update Preview first."
+            )
             return
-        assert self._latest_analysis is not None
+        if self._latest_analysis.layout is None or self._latest_analysis.report.blocking:
+            self.statusBar().showMessage("Fix blocking diagnostics before generating a footprint.")
+            return
         self._complete_generation(self._latest_analysis)
 
     def _complete_generation(self, analysis: AnalysisResult) -> None:
@@ -562,15 +680,12 @@ class SensorMainWindow(QMainWindow):
             QMessageBox.critical(self, "Unsupported sensor", f"This application supports {self.definition.display_name}.")
             return
         self._populate_controls()
-        self._revision += 1
-        self._schedule_validation(delay_ms=0)
-        self.statusBar().showMessage(f"Loaded project {path}")
+        self._on_field_edited()
 
     def _reset_defaults(self) -> None:
         self.request = default_request()
         self._populate_controls()
-        self._revision += 1
-        self._schedule_validation(delay_ms=0)
+        self._on_field_edited()
 
     def _browse_directory(self, key: str) -> None:
         control = self._controls[key]

@@ -29,6 +29,7 @@ class FootprintPreview(QGraphicsView):
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         self._layout: FootprintLayout | None = None
         self._visible_layers: set[str] = set()
+        self._overlay_message: str | None = None
 
     @property
     def layout(self) -> FootprintLayout | None:
@@ -39,6 +40,16 @@ class FootprintPreview(QGraphicsView):
         if layout is not None:
             self._visible_layers = set(layout.layers)
         self._draw()
+
+    @property
+    def overlay_message(self) -> str | None:
+        return self._overlay_message
+
+    def set_overlay_message(self, message: str | None) -> None:
+        if message == self._overlay_message:
+            return
+        self._overlay_message = message
+        self.viewport().update()
 
     def set_layer_visible(self, layer: str, visible: bool) -> None:
         if visible:
@@ -110,6 +121,22 @@ class FootprintPreview(QGraphicsView):
         rect = self._scene.itemsBoundingRect()
         if not rect.isNull():
             self.fitInView(rect.adjusted(-1.0, -1.0, 1.0, 1.0), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def drawForeground(self, painter: QPainter, _rect) -> None:  # noqa: N802 - Qt callback name
+        """Dim a retained layout whenever it no longer matches form values."""
+        super().drawForeground(painter, _rect)
+        if not self._overlay_message:
+            return
+        painter.save()
+        painter.resetTransform()
+        viewport_rect = self.viewport().rect()
+        painter.fillRect(viewport_rect, QColor(15, 23, 42, 185))
+        painter.setPen(QColor("#f8fafc"))
+        font = painter.font()
+        font.setBold(True)
+        painter.setFont(font)
+        painter.drawText(viewport_rect, Qt.AlignmentFlag.AlignCenter, self._overlay_message)
+        painter.restore()
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt callback name
         super().resizeEvent(event)

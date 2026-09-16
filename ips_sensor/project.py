@@ -9,7 +9,7 @@ from typing import Any
 
 from .models import GenerationRequest, LinearSensorConfig, OutputConfig
 
-PROJECT_SCHEMA_VERSION = 2
+PROJECT_SCHEMA_VERSION = 3
 
 
 class ProjectLoadError(ValueError):
@@ -86,5 +86,18 @@ def _migrate(raw: dict[str, Any], schema_version: int) -> dict[str, Any]:
             config = dict(migrated.get("config", {}))
             config["osc1_vin_exit_offset_mm"] = 0.0
             migrated = {**migrated, "schema_version": 2, "config": config}
+        elif version == 2:
+            # These were retired after the generalized receiver routes stopped
+            # consuming them. Automatic primary extension now derives CL1's
+            # actual routing requirement internally.
+            config = dict(migrated.get("config", {}))
+            for key in (
+                "secondary_jump_runup_via_multiplier",
+                "secondary_jump_detour_via_multiplier",
+                "cl1_transition_column_fraction",
+                "cl1_primary_end_min_clearance_mm",
+            ):
+                config.pop(key, None)
+            migrated = {**migrated, "schema_version": 3, "config": config}
         version += 1
     return migrated

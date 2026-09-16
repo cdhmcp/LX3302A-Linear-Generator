@@ -36,7 +36,7 @@ PROPERTIES = {
     "target_side": "top",           # valid options: top OR bottom
 
     # Primary oscillator settings
-    "primary_end_extension_mm": 0.0,    # 0 selects the minimum symmetric clearance from CL2 turnaround vias
+    "primary_end_extension_mm": 0.0,    # 0 selects the minimum symmetric clearance-valid extension
     "primary_y_margin_mm": 0.075,       # this is how far the primary extends past the secondary windings in the vertical (y) direction
     "number_of_primary_turns": 3,
 
@@ -78,11 +78,6 @@ PROPERTIES = {
 
 
     "secondary_curve_samples_per_cycle": 256,
-    "secondary_jump_runup_via_multiplier": 3.0,
-    "secondary_jump_detour_via_multiplier": 0.35,
-    # Recommended CL1 transition-column range: 0.02 to 0.05.
-    "cl1_transition_column_fraction": 0.03,
-    "cl1_primary_end_min_clearance_mm": 1.0,
 }
 
 
@@ -478,17 +473,6 @@ def cl1_right_end_column(cfg: dict, turn_index: int) -> float:
     return half_span - (turn_index * secondary_via_spacing(cfg))
 
 
-def cl1_left_transition_column(cfg: dict, turn_index: int) -> float:
-    """Return one CL1 left transition column in the left-entry frame."""
-    half_span = secondary_stroke_length(cfg) / 2.0
-    left_x = -half_span
-    return (
-        left_x
-        + (secondary_stroke_length(cfg) * cfg["cl1_transition_column_fraction"])
-        + (turn_index * secondary_via_spacing(cfg))
-    )
-
-
 def point_at_station_x(point: Point, station_x: float) -> Point:
     """Clamp a sampled rail point to a known turn column while preserving y."""
     return (station_x, point[1])
@@ -567,9 +551,6 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         "via_hole_size_mm",
         "via_diameter_mm",
         "terminal_escape_length_mm",
-        "secondary_jump_runup_via_multiplier",
-        "secondary_jump_detour_via_multiplier",
-        "cl1_primary_end_min_clearance_mm",
     )
     for name in positive_values:
         if cfg[name] <= 0:
@@ -604,9 +585,6 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         or cfg["secondary_curve_samples_per_cycle"] < 16
     ):
         raise ValueError("secondary_curve_samples_per_cycle must be an integer >= 16.")
-    if not 0.0 < cfg["cl1_transition_column_fraction"] < 0.5:
-        raise ValueError("cl1_transition_column_fraction must be between 0 and 0.5.")
-
     primary_layers(cfg)
     receiver_layers(cfg)
     fanout_direction(cfg)
@@ -618,7 +596,6 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         raise ValueError("via_diameter_mm must be at least as large as via_hole_size_mm.")
 
     pitch = trace_pitch(cfg)
-    receiver_via_spacing = secondary_via_spacing(cfg)
     inset = (cfg["number_of_primary_turns"] - 1) * pitch
     inner_width = dimensions.primary_width_mm - (2.0 * inset)
     inner_length = dimensions.primary_length_mm - (2.0 * inset)
@@ -641,13 +618,7 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
     ):
         raise ValueError("Secondary stroke length is insufficient for requested secondary turns.")
 
-    if cfg["number_of_secondary_turns"] > 1:
-        last_transition_x = cl1_left_transition_column(
-            cfg, cfg["number_of_secondary_turns"] - 2
-        )
-        last_right_x = cl1_right_end_column(cfg, cfg["number_of_secondary_turns"] - 1)
-        if last_transition_x + receiver_via_spacing + GEOMETRY_TOLERANCE_MM >= last_right_x:
-            raise ValueError("CL1 transition columns exceed the available secondary span.")
+
 def osc1_via_trace_clearance(cfg: dict) -> float:
     """Return center-to-center clearance from the shared VIN via to a trace."""
     return (
@@ -974,14 +945,16 @@ def validate_osc2_clearance(
             raise ValueError("OSC2 output terminal via violates clearance to OSC1 copper.")
 
 
-def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
-    """Return point-driven primary geometry and the shared VIN escape."""
-    cfg = build_config() if cfg is None else cfg
-    dimensions = calculate_dimensions(cfg)
-    validate_config(cfg, dimensions)
+def _build_primary_geometry_for_dimensions(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    *,
+    validate_geometry: bool,
+) -> PrimaryGeometry:
+    """Build primary geometry for known dimensions, optionally skipping clearance checks."""
     osc1_points = build_osc1_point_map(cfg, dimensions)
     osc1_body_segments, osc1_escape_segments = build_osc1_segments(cfg, osc1_points)
-    if not should_skip_geometry_validation(cfg):
+    if validate_geometry:
         validate_osc1_vin_exit_inset(cfg, dimensions)
         validate_osc1_clearance(cfg, osc1_points, osc1_body_segments, osc1_escape_segments)
     osc1_layer, osc2_layer = primary_layers(cfg)
@@ -1004,7 +977,7 @@ def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
     if cfg["generate_osc2"]:
         osc2_points = build_osc2_point_map(cfg, osc1_points)
         osc2_body_segments = build_osc2_segments(cfg, osc2_points)
-        if not should_skip_geometry_validation(cfg):
+        if validate_geometry:
             validate_osc2_clearance(
                 cfg,
                 osc1_points,
@@ -1022,6 +995,18 @@ def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
         dimensions=dimensions,
         pads=pads,
         coils=tuple(coils),
+    )
+
+
+def build_primary_geometry(cfg: dict | None = None) -> PrimaryGeometry:
+    """Return point-driven primary geometry and the shared VIN escape."""
+    cfg = build_config() if cfg is None else cfg
+    dimensions = calculate_dimensions(cfg)
+    validate_config(cfg, dimensions)
+    return _build_primary_geometry_for_dimensions(
+        cfg,
+        dimensions,
+        validate_geometry=not should_skip_geometry_validation(cfg),
     )
 
 
@@ -2509,14 +2494,130 @@ def minimum_primary_end_extension(
     return max(0.0, left_turnaround_extension, right_turnaround_extension)
 
 
+def _trial_dimensions_for_primary_extension(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    extension: float,
+) -> SensorDimensions:
+    """Return dimensions for one candidate symmetric primary end extension."""
+    return SensorDimensions(
+        secondary_length_mm=dimensions.secondary_length_mm,
+        secondary_width_mm=dimensions.secondary_width_mm,
+        primary_length_mm=dimensions.secondary_length_mm + (2.0 * extension),
+        primary_width_mm=dimensions.primary_width_mm,
+    )
+
+
+def _cl1_layout_can_plan_at_primary_extension(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    extension: float,
+) -> bool:
+    """Return whether CL1's transition layout can be planned at one extension."""
+    trial_dimensions = _trial_dimensions_for_primary_extension(cfg, dimensions, extension)
+    try:
+        primary = _build_primary_geometry_for_dimensions(
+            cfg,
+            trial_dimensions,
+            validate_geometry=False,
+        )
+        cl2 = _build_cl2_geometry_for_dimensions(
+            cfg,
+            trial_dimensions,
+            primary,
+            validate_geometry=False,
+        )
+        build_multiturn_cl1_layout(cfg, trial_dimensions, cl2, primary)
+    except ValueError:
+        return False
+    return True
+
+
+@lru_cache(maxsize=128)
+def _cached_minimum_cl1_primary_end_extension(
+    config_items: tuple[tuple[str, object], ...],
+    secondary_length_mm: float,
+    secondary_width_mm: float,
+    primary_width_mm: float,
+    lower_bound: float,
+) -> float:
+    """Find the smallest practical primary extension that permits CL1 planning."""
+    cfg = dict(config_items)
+    dimensions = SensorDimensions(
+        secondary_length_mm=secondary_length_mm,
+        secondary_width_mm=secondary_width_mm,
+        primary_length_mm=secondary_length_mm,
+        primary_width_mm=primary_width_mm,
+    )
+    if _cl1_layout_can_plan_at_primary_extension(cfg, dimensions, lower_bound):
+        return lower_bound
+
+    step = max(
+        1.0,
+        trace_pitch(cfg),
+        secondary_via_spacing(cfg),
+        osc1_via_trace_clearance(cfg),
+    )
+    lower = lower_bound
+    upper = lower + step
+    for _attempt in range(16):
+        if _cl1_layout_can_plan_at_primary_extension(cfg, dimensions, upper):
+            # The generated geometry is continuous in this interval; return a
+            # clearance-safe value within 0.005 mm of the first valid point.
+            for _iteration in range(8):
+                midpoint = (lower + upper) / 2.0
+                if _cl1_layout_can_plan_at_primary_extension(cfg, dimensions, midpoint):
+                    upper = midpoint
+                else:
+                    lower = midpoint
+            return upper
+        lower = upper
+        upper += step
+
+    # Leave non-extension routing failures to the normal CL1 diagnostic path,
+    # which can explain whether height, turn count, or another constraint is at fault.
+    return lower_bound
+
+
+def minimum_cl1_primary_end_extension(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    lower_bound: float,
+) -> float:
+    """Return the automatic extension CL1 needs after CL2 requirements are met."""
+    if not cfg["generate_cl1"]:
+        return 0.0
+    # Only geometry inputs belong in the cache key. This deliberately ignores
+    # obsolete script-only dictionary entries as well as output/debug choices.
+    cache_items = tuple(
+        sorted(
+            (key, cfg[key])
+            for key in PROPERTIES
+            if key not in {
+                "primary_end_extension_mm",
+                "output_dir",
+                "allow_invalid_geometry",
+            }
+        )
+    )
+    return _cached_minimum_cl1_primary_end_extension(
+        cache_items,
+        dimensions.secondary_length_mm,
+        dimensions.secondary_width_mm,
+        dimensions.primary_width_mm,
+        lower_bound,
+    )
+
+
 def effective_primary_end_extension(
     cfg: dict,
     dimensions: SensorDimensions,
 ) -> float:
     """Resolve automatic or user-specified symmetric OSC end extension."""
+    cl2_minimum = minimum_primary_end_extension(cfg, dimensions)
     minimum_extension = max(
-        minimum_primary_end_extension(cfg, dimensions),
-        cfg["cl1_primary_end_min_clearance_mm"],
+        cl2_minimum,
+        minimum_cl1_primary_end_extension(cfg, dimensions, cl2_minimum),
     )
     requested_extension = cfg["primary_end_extension_mm"]
     if requested_extension == 0.0:
@@ -3622,19 +3723,18 @@ def validate_multiturn_cl2_clearance(
         raise ValueError(turnaround_violations[0])
 
 
-def build_cl2_geometry(
-    cfg: dict | None = None,
-    primary_geometry: PrimaryGeometry | None = None,
+def _build_cl2_geometry_for_dimensions(
+    cfg: dict,
+    dimensions: SensorDimensions,
+    primary_geometry: PrimaryGeometry,
+    *,
+    validate_geometry: bool,
 ) -> SecondaryCoil | None:
-    """Build the configured CL2 receiver coil, or return ``None`` when disabled."""
-    cfg = build_config() if cfg is None else cfg
+    """Build CL2 for known dimensions, optionally skipping clearance checks."""
     if not cfg["generate_cl2"]:
         return None
-    dimensions = calculate_dimensions(cfg)
-    validate_config(cfg, dimensions)
-    primary_geometry = primary_geometry or build_primary_geometry(cfg)
     layout = build_multiturn_cl2_layout(cfg, dimensions, primary_geometry)
-    if not should_skip_geometry_validation(cfg):
+    if validate_geometry:
         validate_multiturn_cl2_clearance(cfg, dimensions, primary_geometry, layout)
     points, via_labels = canonical_receiver_point_map(layout.points, layout.via_labels)
     return SecondaryCoil(
@@ -3646,6 +3746,25 @@ def build_cl2_geometry(
         target_segments=layout.target_segments,
         inner_segments=layout.inner_segments,
         via_labels=via_labels,
+    )
+
+
+def build_cl2_geometry(
+    cfg: dict | None = None,
+    primary_geometry: PrimaryGeometry | None = None,
+) -> SecondaryCoil | None:
+    """Build the configured CL2 receiver coil, or return ``None`` when disabled."""
+    cfg = build_config() if cfg is None else cfg
+    if not cfg["generate_cl2"]:
+        return None
+    dimensions = calculate_dimensions(cfg)
+    validate_config(cfg, dimensions)
+    primary_geometry = primary_geometry or build_primary_geometry(cfg)
+    return _build_cl2_geometry_for_dimensions(
+        cfg,
+        dimensions,
+        primary_geometry,
+        validate_geometry=not should_skip_geometry_validation(cfg),
     )
 
 
@@ -4337,12 +4456,6 @@ def validate_multiturn_cl1_clearance(
     layout: CL1LayoutPlan,
 ) -> None:
     """Validate the generated CL1 spiral for the generalized receiver path."""
-    endpoint_clearance = (
-        (dimensions.primary_length_mm - secondary_stroke_length(cfg)) / 2.0
-    )
-    if endpoint_clearance + GEOMETRY_TOLERANCE_MM < cfg["cl1_primary_end_min_clearance_mm"]:
-        raise ValueError("CL1 endpoint violates minimum clearance to the primary end winding.")
-
     minimum_pad_distance = secondary_via_spacing(cfg)
     for first_index, first in enumerate(layout.via_labels):
         for second in layout.via_labels[first_index + 1:]:
