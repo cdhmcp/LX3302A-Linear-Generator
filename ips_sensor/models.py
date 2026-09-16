@@ -20,7 +20,9 @@ class LinearSensorConfig:
     target_side: str = "top"
 
     primary_end_extension_mm: float = 0.0
-    primary_y_margin_mm: float = 0.075
+    # Retain the legacy field name for script/project compatibility. Its value
+    # is the total vertical extension, not a per-side margin.
+    primary_y_margin_mm: float = 0.0
     number_of_primary_turns: int = 3
 
     number_of_secondary_turns: int = 4

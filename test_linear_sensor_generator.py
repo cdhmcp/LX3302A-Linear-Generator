@@ -11,20 +11,20 @@ import linear_sensor_generator as generator
 
 
 FINGERPRINTS = {
-    "1:9:left": "6fd84bacc71fd217aa424a11ffc1587a0130b31534284e0df12b5ef176d25a9e",
-    "1:9:right": "46da77fb6216a12c156372eea4d188d47dabb4521ce069d658bbb2b859ae8a86",
-    "2:9:left": "3fec412d3ae8f8dc6a0a1c6f14662c06ae83589ee1a31b8e860ec2d95fdd5ef0",
-    "2:9:right": "cfe9fdad375b5ea34cb50c416cc2046c6f6a5eef4cdd1bf207f43104dd68622d",
-    "3:9:left": "621ff5d13675a9e04484ef6555d755fd1ee9decb529724fa681169da9b368357",
-    "3:9:right": "46bdbe0ee771a93cb7d442cfe198e5ee992fc3c86533c7d807d134e9c5c29b0a",
-    "4:12:left": "cfda0cce79e77ea83feecaacbb8ed1a8c14f708251f9869eec81d197d1ae16a1",
-    "4:12:right": "a3f4e172d3a19f9b3dedd113de4cfcb18c78d21214a326f88db37c5c983f34ad",
-    "5:13:left": "5de64e80f885a912f0114a7d7b444a9976a5c58fbe278ca3a6de3c666cf5e112",
-    "5:13:right": "f78ece57d4b00839c5824d862734b4aeb98636fef34650c0d7e35cf5effd3d58",
+    "1:9:left": "7d02843fa148d340ea35726d77b847742fd7b490cc343fcee161024482e9364c",
+    "1:9:right": "6114ec34e80e04bc14f1e222719d5b7cf53485a4e2665f111286eccd53f5da07",
+    "2:9:left": "49c812f7e4642a3a68a2d2e6fcd97fef8676e186903e890e1f5a7381ed38f513",
+    "2:9:right": "bdf1a1b62dee7131f3132841723676bb252b69f40b48937c483de4bc25b95d0e",
+    "3:9:left": "a2c3ba6ea045a8ba26983cdd6169c771fb7c52c05a954ddc9d556d082e4e711c",
+    "3:9:right": "24d920b87645da245bad550c1249c7d3f88b87ffc030570fc15cbc1a6dd4ccc4",
+    "4:12:left": "3cd1b29b811c6862b3b335eea54a22efc96accc4d39f14f39837639586b52b63",
+    "4:12:right": "762fee485f4913e7f3578376495362b64acf864be27bd98d28f43169e2f5cd10",
+    "5:13:left": "e15fba1344f8ff9b1d864350dfb71fd074ba55d8d047bdb56ebd8c5fe2825674",
+    "5:13:right": "c7ac216b101e534592a9e301c16bcf28d8b409dc4d78edea7a1e37efb3904330",
 }
 
 DEFAULT_AUTOMATIC_FOOTPRINT_SHA256 = (
-    "68e036232b1c77f78c52ad55c95774fa7bf3eafaacc80c72d006ce47e47bcc90"
+    "aae7afb63246f7fa897a43c25f90e74113bd9733d8ff3fe363cb96f92863f5d2"
 )
 
 
@@ -121,6 +121,22 @@ class NamingAndGeometryTests(unittest.TestCase):
         self.assertEqual(
             hashlib.sha256(generator.render_footprint(cfg).encode()).hexdigest(),
             DEFAULT_AUTOMATIC_FOOTPRINT_SHA256,
+        )
+
+    def test_primary_vertical_extension_is_total_and_allows_zero(self):
+        zero_cfg = generator.build_config({"primary_y_margin_mm": 0.0})
+        zero_dimensions = generator.calculate_dimensions(zero_cfg)
+        generator.validate_config(zero_cfg, zero_dimensions)
+        self.assertEqual(
+            zero_dimensions.primary_width_mm,
+            zero_dimensions.secondary_width_mm,
+        )
+
+        extension_cfg = generator.build_config({"primary_y_margin_mm": 0.4})
+        extension_dimensions = generator.calculate_dimensions(extension_cfg)
+        self.assertAlmostEqual(
+            extension_dimensions.primary_width_mm,
+            extension_dimensions.secondary_width_mm + 0.4,
         )
 
     def test_manual_primary_corridor_inset_moves_dependent_primary_routes(self):

@@ -65,9 +65,10 @@ PARAMETERS: tuple[ParameterSpec, ...] = (
     _spec("primary_end_extension_mm", "Primary end extension", "Primary coils", ParameterKind.FLOAT,
           "Extra primary-coil length beyond the secondary stroke on each end. Enter 0 to select the calculated minimum safe extension.",
           unit="mm", minimum=0),
-    _spec("primary_y_margin_mm", "Primary vertical margin", "Primary coils", ParameterKind.FLOAT,
-          "How far the primary envelope extends beyond receiver windings vertically.",
-          unit="mm", minimum=0, exclusive_minimum=True),
+    _spec("primary_y_margin_mm", "Primary vertical extension", "Primary coils", ParameterKind.FLOAT,
+          "Total additional height of the primary envelope beyond the secondary width. "
+          "The envelope is secondary width plus this extension; 0 keeps both envelopes the same height.",
+          unit="mm", minimum=0),
     _spec("number_of_primary_turns", "Primary turns", "Primary coils", ParameterKind.INTEGER,
           "Number of turns in each oscillator primary winding. The GUI supports one through five turns.",
           minimum=1, maximum=5),

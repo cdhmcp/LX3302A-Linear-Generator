@@ -37,7 +37,8 @@ PROPERTIES = {
 
     # Primary oscillator settings
     "primary_end_extension_mm": 0.0,    # 0 selects the minimum symmetric clearance-valid extension
-    "primary_y_margin_mm": 0.075,       # this is how far the primary extends past the secondary windings in the vertical (y) direction
+    # Total additional primary-envelope height beyond the secondary width.
+    "primary_y_margin_mm": 0.0,
     "number_of_primary_turns": 3,
 
     # Secondary receiver settings
@@ -213,7 +214,7 @@ def calculate_dimensions(cfg: dict) -> SensorDimensions:
     """Calculate receiver reference bounds and the primary outer centerline."""
     secondary_length = cfg["stroke_range_mm"]
     secondary_width = cfg["target_y_mm"] - cfg["secondary_y_reduction_mm"]
-    primary_width = secondary_width + (2.0 * cfg["primary_y_margin_mm"])
+    primary_width = secondary_width + cfg["primary_y_margin_mm"]
     provisional_dimensions = SensorDimensions(
         secondary_length_mm=secondary_length,
         secondary_width_mm=secondary_width,
@@ -545,7 +546,6 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
         "target_x_mm",
         "target_y_mm",
         "stroke_range_mm",
-        "primary_y_margin_mm",
         "trace_width_mm",
         "trace_spacing_mm",
         "via_hole_size_mm",
@@ -557,6 +557,7 @@ def validate_config(cfg: dict, dimensions: SensorDimensions | None = None) -> No
             raise ValueError(f"{name} must be > 0.")
     for name in (
         "primary_end_extension_mm",
+        "primary_y_margin_mm",
         "secondary_y_reduction_mm",
         "osc1_vin_exit_offset_mm",
     ):

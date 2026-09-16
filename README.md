@@ -15,6 +15,8 @@ The application presents common settings first and exposes all routing and namin
 
 Set **Primary end extension** to `0` to have the generator select the smallest symmetric extension required by the active CL1 and CL2 routing. A positive value is accepted only when it is at least that computed clearance-safe value.
 
+**Primary vertical extension** is the total extra height of the primary envelope: `primary width = secondary width + extension`. It defaults to `0 mm`, which keeps the two envelopes the same height.
+
 ## Generate from a saved project
 
 The GUI saves portable, versioned `*.ips-sensor.json` files. They contain the selected sensor definition, exporter, all sensor values, and output folder.

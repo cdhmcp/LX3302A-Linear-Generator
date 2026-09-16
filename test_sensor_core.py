@@ -88,6 +88,14 @@ class CoreValidationTests(unittest.TestCase):
         self.assertIn("automatic", spec.help_text.lower())
         self.assertEqual(default_request().config.osc1_vin_exit_offset_mm, 0.0)
 
+    def test_primary_vertical_extension_metadata_allows_zero(self):
+        spec = PARAMETERS_BY_KEY["primary_y_margin_mm"]
+        self.assertEqual(spec.label, "Primary vertical extension")
+        self.assertEqual(spec.minimum, 0)
+        self.assertFalse(spec.exclusive_minimum)
+        self.assertEqual(default_request().config.primary_y_margin_mm, 0.0)
+        self.assertIn("total", spec.help_text.lower())
+
     def test_too_small_manual_corridor_inset_is_an_overrideable_setting_diagnostic(self):
         request = default_request()
         request = replace(
@@ -147,7 +155,7 @@ class ProjectFileTests(unittest.TestCase):
             config=replace(default_request().config, osc1_vin_exit_offset_mm=2.0),
         )
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "v3.ips-sensor.json"
+            path = Path(temp_dir) / "v4.ips-sensor.json"
             save_project(path, request)
             self.assertEqual(load_project(path).config.osc1_vin_exit_offset_mm, 2.0)
 
@@ -166,6 +174,22 @@ class ProjectFileTests(unittest.TestCase):
             )
             request = load_project(path)
             self.assertFalse(set(retired) & set(asdict(request.config)))
+
+    def test_v3_project_migrates_per_side_primary_margin_to_total_extension(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "v3.ips-sensor.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 3,
+                        "config": {"primary_y_margin_mm": 0.075},
+                        "output": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            request = load_project(path)
+            self.assertEqual(request.config.primary_y_margin_mm, 0.15)
 
 
 try:

@@ -9,7 +9,7 @@ from typing import Any
 
 from .models import GenerationRequest, LinearSensorConfig, OutputConfig
 
-PROJECT_SCHEMA_VERSION = 3
+PROJECT_SCHEMA_VERSION = 4
 
 
 class ProjectLoadError(ValueError):
@@ -99,5 +99,13 @@ def _migrate(raw: dict[str, Any], schema_version: int) -> dict[str, Any]:
             ):
                 config.pop(key, None)
             migrated = {**migrated, "schema_version": 3, "config": config}
+        elif version == 3:
+            # Before v4 this value was a per-side margin and the primary
+            # envelope added it twice. It is now one total extension.
+            config = dict(migrated.get("config", {}))
+            old_margin = config.get("primary_y_margin_mm", 0.075)
+            if isinstance(old_margin, (int, float)) and not isinstance(old_margin, bool):
+                config["primary_y_margin_mm"] = old_margin * 2.0
+            migrated = {**migrated, "schema_version": 4, "config": config}
         version += 1
     return migrated
