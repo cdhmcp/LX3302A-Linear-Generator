@@ -43,6 +43,33 @@ On a Windows build machine with Python installed, run:
 
 It creates an onedir bundle under `dist\IPS-Sensor-GUI`. Code signing and installer wrapping are intentionally release-process steps because no certificate or distribution channel is included in this repository.
 
+## Internal Windows releases
+
+Internal releases are versioned ZIP files made from an annotated Git tag. Normal development commits are not versioned; create a tag only for a build that will be distributed.
+
+1. Update the `version` in `pyproject.toml`, commit the release candidate, and create an annotated tag such as `v0.1.0`.
+2. From that clean, tagged commit, run:
+
+   ```powershell
+   .\scripts\release_windows.ps1 -Version 0.1.0
+   ```
+
+   Pass `-ReleaseNotesPath .\my-release-notes.md` to supply curated Markdown notes; otherwise the script creates notes from Git commit subjects.
+3. Push the release commit and tag, then publish the generated `dist\releases\v0.1.0` folder to the internal release location:
+
+   ```powershell
+   git push origin gui
+   git push origin v0.1.0
+   ```
+
+   The folder contains the versioned ZIP, `SHA256SUMS.txt`, `INSTALL.txt`, and release notes.
+
+Users should download the ZIP, extract the whole folder locally, and run `IPS-Sensor-GUI.exe`. Do not run it directly from a network share or from inside the ZIP. Keep published release folders intact for rollback; the script refuses to overwrite an existing release version.
+
+Use `v0.1.1` for a bug-fix release and `v0.2.0` for a new internal feature. Never move a published tag; create a new version instead. Application versions are independent of `PROJECT_SCHEMA_VERSION`, which changes only when the saved sensor-project file format requires migration.
+
+Before publishing a release, test the ZIP on a clean Windows workstation or VM with no source checkout or Python installation. Confirm it launches, validates a sensor, saves and reloads a project, and writes a KiCad footprint. Also compare the ZIP hash with `SHA256SUMS.txt` using `Get-FileHash`.
+
 ## Architecture
 
 - `ips_sensor.models`: immutable request, sensor, and output configuration models.
